@@ -505,11 +505,14 @@ for `DERIV_APP_ID`, `DERIV_API_TOKEN`, `DASHBOARD_USERNAME`, and
 `DASHBOARD_PASSWORD`. Use a demo-scope Deriv token and a strong, unique
 dashboard password. Do not commit these values to GitHub.
 
-The Blueprint uses Gunicorn, binds to Render's `$PORT`, enables the demo
-account guard, and stores SQLite data and logs on `/var/data`. Its persistent
-disk requires a paid Render service. Keep the service at one instance because
-the bot and its SQLite database are single-instance. After deployment, open
-the `onrender.com` URL, sign in with the dashboard credentials, and press
+The Blueprint uses Render's Free web service, Gunicorn, and `$PORT`. It keeps
+the demo account guard enabled and stores SQLite data and logs under `/tmp`.
+Render's free filesystem is temporary: service restarts, sleeps, or redeploys
+can erase trade history and unresolved-contract records. Free services also
+sleep after 15 minutes without inbound traffic and can restart at any time.
+Keep the dashboard open while trying the bot, and use this plan for demos or
+testing only, not unattended trading. After deployment, open the
+`onrender.com` URL, sign in with the dashboard credentials, and press
 **Start**; deployment does not start trading automatically.
 
 Render requires authentication for the public dashboard. Requests are

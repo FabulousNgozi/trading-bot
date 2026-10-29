@@ -2,15 +2,11 @@ services:
   - type: web
     name: deriv-volatility-bot
     runtime: python
-    plan: starter
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn --workers 1 --threads 8 --timeout 120 --bind 0.0.0.0:$PORT webapp.server:app
     healthCheckPath: /healthz
     numInstances: 1
-    disk:
-      name: bot-data
-      mountPath: /var/data
-      sizeGB: 1
     envVars:
       - key: DERIV_APP_ID
         sync: false
@@ -23,11 +19,11 @@ services:
       - key: REQUIRE_DEMO_ACCOUNT
         value: "true"
       - key: DB_PATH
-        value: /var/data/bot.db
+        value: /tmp/bot.db
       - key: CSV_PATH
-        value: /var/data/trades.csv
+        value: /tmp/trades.csv
       - key: LOG_FILE
-        value: /var/data/bot.log
+        value: /tmp/bot.log
       - key: LOG_LEVEL
         value: INFO
       - key: MAX_OPEN_CONTRACTS
