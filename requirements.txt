@@ -1,0 +1,28 @@
+# Deriv Volatility Bot — runtime dependencies
+# Python 3.10+ required.
+
+# WebSocket client for the Deriv Options API (wss://api.derivws.com)
+websocket-client==1.8.0
+
+# HTTP client for the Deriv REST API (OTP issuance, account listing)
+requests==2.32.3
+
+# Environment variable loading from .env
+python-dotenv==1.0.1
+
+# ---------------------------------------------------------------------------
+# Web control panel (server.py)
+# ---------------------------------------------------------------------------
+# Flask rather than FastAPI: the bot engine is synchronous (blocking
+# websocket-client reads on its own thread, synchronous SQLite), so async
+# endpoints would only wrap blocking calls. Flask's threaded dev server maps
+# cleanly onto one-request-per-thread here, SSE is a plain generator response,
+# and there is no ASGI/WSGI bridge to maintain.
+Flask==3.0.3
+gunicorn==23.0.0
+
+# ---------------------------------------------------------------------------
+# Development / test dependencies
+# ---------------------------------------------------------------------------
+pytest==8.3.4
+pytest-asyncio==0.24.0

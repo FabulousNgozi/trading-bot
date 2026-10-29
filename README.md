@@ -1,0 +1,668 @@
+# Deriv Volatility Bot
+
+An automated **demo-only** trading bot for Deriv synthetic indices. It
+discovers active markets and rotates through available Volatility, Step,
+Crash/Boom, Jump and Range Break indices. It trades 1-minute Rise/Fall
+contracts with a fixed $1 stake, a multi-timeframe trend-following strategy,
+and hard risk limits that survive a restart.
+
+> **This bot cannot trade real money.** It refuses to start unless the
+> authorised account is positively identified as a demo (virtual) account.
+> There is no configuration flag that changes this.
+
+---
+
+## Contents
+
+1. [What it does](#1-what-it-does)
+2. [API divergences you must know about](#2-api-divergences-you-must-know-about)
+3. [Install (Ubuntu)](#3-install-ubuntu)
+4. [Deriv App ID and demo token](#4-deriv-app-id-and-demo-token)
+5. [Configuration](#5-configuration)
+6. [Running the bot](#6-running-the-bot)
+7. [Stopping safely](#7-stopping-safely)
+8. [Backtesting](#8-backtesting)
+9. [Architecture](#9-architecture)
+10. [Risk model](#10-risk-model)
+11. [Logs and reports](#11-logs-and-reports)
+12. [Troubleshooting](#12-troubleshooting)
+13. [Testing](#13-testing)
+14. [Limitations](#14-limitations)
+15. [Risk warning](#15-risk-warning)
+16. [Web UI](#16-web-ui)
+
+---
+
+## 1. What it does
+
+Every `SCAN_INTERVAL_SECONDS` (default 15s) the bot:
+
+1. Checks whether a contract is open. If so, it monitors it to a final result
+   before doing anything else.
+2. Runs the risk gate. If any limit is breached, it logs why and skips the scan.
+3. Fetches 1h, 5m and 1m candles for the next five synthetic indices in the
+   rotating scan list; the full list is revisited over successive cycles.
+4. Evaluates the strategy on each market and scores the setup.
+5. Ranks actionable signals by score and takes **at most one** trade — the
+   strongest.
+6. Never re-enters on the same completed candle.
+
+The strategy is trend-following with momentum confirmation and support/
+resistance reaction:
+
+| Component | Weight | Condition |
+|---|---|---|
+| EMA agreement (1m) | 25 | EMA20 > EMA50 > EMA200 (or the reverse) |
+| HTF confirmation (1h) | 20 | 1h EMA20/EMA200 agrees with the 1m direction |
+| RSI momentum band | 15 | RSI(14) inside `[RSI_MIN, RSI_MAX]` |
+| S/R reaction | 25 | Rejection at a swing level — never a bare touch |
+| Candlestick confirmation | 15 | Rejection candle or strong close |
+
+A trade requires a non-sideways 1m trend, RSI inside its directional band,
+the configured HTF and candle confirmations, and a score ≥
+`MIN_SIGNAL_SCORE`. S/R contributes 25 points but is no longer an
+unconditional veto when the other confluence is strong.
+
+**The score is a confluence count, not a probability.** A score of 80 means
+"most of the conditions I look for lined up". It does not mean an 80% chance
+of winning, and nothing in this project presents it that way.
+
+---
+
+## 2. API divergences you must know about
+
+The Deriv API changed substantially. This bot targets the **current** API,
+verified against `developers.deriv.me` and the live endpoints in October 2026.
+If you are following an older tutorial, most of it will not work.
+
+| Area | Old (legacy v3) | Current (this bot) |
+|---|---|---|
+| WebSocket host | `wss://ws.derivws.com/websockets/v3?app_id=…` | `wss://api.derivws.com/trading/v1/options/ws/{public,demo,real}` |
+| Authentication | `{"authorize": "<token>"}` message | **OTP in the URL.** `POST /trading/v1/options/accounts/{id}/otp` returns a ready-to-use `wss://…/ws/demo?otp=…` |
+| `authorize` method | Supported | **Removed** — returns `UnknownMethod` |
+| REST base | n/a | `https://api.derivws.com` |
+| REST headers | n/a | `Authorization: Bearer <PAT>` **and** `Deriv-App-ID: <app_id>` (the App-ID header is required for PAT auth) |
+| Demo detection | `authorize` response `is_virtual` | `GET /trading/v1/options/accounts` → `account_type: "demo" \| "real"` |
+| `contracts_for` | Accepted `currency` | **Rejects** `currency` (`InputValidationFailed`) |
+| `active_symbols` | Accepted `product_type` | **Rejects** `product_type` |
+| Candle count | Larger limits | **Capped at 1000** per request |
+| `granularity=30` | Supported | **Rejected** — use 60, 300, 3600 |
+| Legacy host reachability | Working | `ws.derivws.com` returns **HTTP 520** |
+
+**Consequences baked into the code:**
+
+* `deriv_client.connect()` never sends an `authorize` message. It obtains an
+  OTP URL and connects to it.
+* Demo verification reads `account_type` from the REST account list, and
+  additionally asserts the OTP URL contains `/ws/demo`.
+* `contracts_for()` deliberately omits `currency`.
+* `candles()` clamps `count` to 1000.
+* The backtester fetches **native** 1h/5m/1m series rather than aggregating
+  from 1m. Aggregating 1000 one-minute bars yields only 18 hourly bars, which
+  is not enough for EMA200 — the HTF filter would then block every signal.
+  This was found by running it, not by reading the docs.
+
+---
+
+## 3. Install (Ubuntu)
+
+```bash
+# 1. Get the project
+cd ~
+unzip deriv_volatility_bot.zip
+cd deriv_volatility_bot
+
+# 2. Virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+# 3. Dependencies
+pip install -r requirements.txt
+
+# 4. Verify the install
+pytest -q
+```
+
+Requires **Python 3.10+** (uses `zoneinfo`). Tested on Python 3.11.15.
+
+---
+
+## 4. Deriv App ID and demo token
+
+1. Go to <https://developers.deriv.com> and log in.
+2. **Dashboard → Register a new application.** Choose the **PAT** type
+   (Personal Access Token) — this bot is a CLI tool, so PAT is correct.
+   Copy the **App ID**.
+   *Legacy App IDs (including `1089`) do not work with the new API.*
+3. In the Deriv dashboard, switch to your **Demo** account.
+4. **API tokens → New token.** Required scope: **`trade`**.
+   (`account_manage` is not needed — the bot never creates accounts.)
+5. Copy the token. **It is shown once.**
+
+> The token must belong to a **demo** account. If you generate it on a real
+> account, the bot will detect `account_type: "real"` and refuse to start.
+
+### Secure environment setup
+
+```bash
+cp .env.example .env
+chmod 600 .env          # owner-read/write only
+nano .env               # paste DERIV_APP_ID and DERIV_API_TOKEN
+```
+
+`.env` is in `.gitignore`. **Never** commit it, paste a token into source
+code, a chat window, a screenshot, or a support ticket. The bot never logs a
+token: a redaction filter scrubs `Bearer …`, `otp=…`, and `"token": "…"`
+patterns from every log record.
+
+---
+
+## 5. Configuration
+
+All settings are environment variables (see `.env.example` for the annotated
+list). The important ones:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DERIV_APP_ID` | — | **Required.** Your application ID |
+| `DERIV_API_TOKEN` | — | **Required.** PAT for a demo account |
+| `STAKE` | `1.0` | Fixed stake. Never escalated |
+| `CURRENCY` | `USD` | Must match the account |
+| `CONTRACT_TYPE` | `CALL` | Legacy setting; each order follows the signal direction (`CALL` or `PUT`) |
+| `DURATION` / `DURATION_UNIT` | `1` / `m` | 1-minute contracts |
+| Market scanner | Automatic | Discovers active synthetic-index markets and scans five per cycle |
+| `MAX_OPEN_CONTRACTS` | `3` | Maximum simultaneous contracts (1–5) |
+| `MAX_CONSECUTIVE_LOSSES` | `3` | Stop after this many losses in a row |
+| `DAILY_LOSS_LIMIT` | `5.0` | Daily stop-loss: pause after this realised loss |
+| `DAILY_PROFIT_TARGET` | `0` | Daily take-profit: pause after this realised profit (`0` disables it) |
+| `COOLDOWN_SECONDS` | `60` | Minimum gap between entries |
+| `MAX_TRADES_PER_DAY` | `20` | Daily entry cap |
+| `LOSS_COOLDOWN_MINUTES` | `60` | Pause after the loss-streak limit (`0` = manual reset only) |
+| `TRADING_DAY_TIMEZONE` | `UTC` | Where the trading day rolls over |
+| `MIN_SIGNAL_SCORE` | `60` | Minimum score to trade |
+| `SCAN_INTERVAL_SECONDS` | `15` | Scan frequency |
+
+Every value is validated at startup. A bad value (e.g. `EMA_FAST=200` with
+`EMA_SLOW=20`, an unknown index, an invalid timezone) produces a clear error
+and exit code 2 — it never fails halfway through a trade.
+
+### Trading-day boundary
+
+The daily profit target, loss limit and trade counter reset at **local midnight in
+`TRADING_DAY_TIMEZONE`**. With the default `UTC`, the day rolls over at 00:00
+UTC. Change it to your own zone if you prefer, but understand that changing it
+changes when your limits reset.
+
+---
+
+## 6. Running the bot
+
+```bash
+source .venv/bin/activate
+python bot.py
+```
+
+A healthy startup looks like this:
+
+```
+====================================================================
+Deriv Volatility Bot — DEMO ONLY
+====================================================================
+12:00:01  INFO  deriv_client  Connected — account DOT90004580 (demo), currency USD, balance 10000.0
+12:00:01  INFO  bot           DEMO MODE CONFIRMED — account DOT90004580, balance 10000.0 USD
+12:00:02  INFO  market_data   Resolved 5 market(s): V10=R_10, V25=R_25, V50=R_50, V75=R_75, V100=R_100
+12:00:02  INFO  bot           Available markets: V10, V25, V50, V75, V100
+12:00:02  INFO  bot           Stake: 1.00 USD | Duration: 1m | Max open: 3
+12:00:02  INFO  bot           Risk: daily loss 5.00 | daily profit target 0.00 | 3 consecutive losses | 20 trades/day | 60s cooldown
+12:00:02  INFO  bot           Trading day boundary: midnight UTC
+```
+
+If the account is not demo, startup stops with:
+
+```
+*** DEMO-ONLY PROTECTION TRIGGERED ***
+DEMO-ONLY: no demo account found for this token (account types present: ['real']).
+The bot will not trade a real-money account.
+No purchase will be attempted. Exiting.
+```
+
+---
+
+## 7. Stopping safely
+
+Press **Ctrl-C** (or send `SIGTERM`). The bot:
+
+1. Stops starting new scans.
+2. **Keeps monitoring all open contracts** to a final result, so P/L is
+   never lost.
+3. Exports the trade history to CSV.
+4. Closes the database and the WebSocket.
+
+Do not `kill -9` while a contract is open — the result would be recorded as
+unresolved and the bot would block new trades until it reconciles on the next
+start (which it does automatically).
+
+---
+
+## 8. Backtesting
+
+```bash
+# All five indices, real historical candles from the public endpoint
+python backtest.py
+
+# One market, custom payout assumption
+python backtest.py --symbols R_100 --payout 1.95 --balance 1000
+
+# Offline smoke test with synthetic data (clearly labelled)
+python backtest.py --offline --symbols R_100
+```
+
+Output: a per-market report plus `data/backtest_report.csv` (one row per
+trade, with the full reason string).
+
+### Sample results (real data, 2026-10-27 19:31 → 2026-10-28 12:10 UTC)
+
+| Symbol | Trades | Wins | Losses | Win % | Net | Max DD | Longest loss run | PF |
+|---|---|---|---|---|---|---|---|---|
+| R_10 | 2 | 1 | 1 | 50.00 | −0.05 | 1.00 | 1 | 0.95 |
+| R_25 | 20 | 10 | 10 | 50.00 | −0.50 | 3.00 | 3 | 0.95 |
+| R_50 | 7 | 4 | 3 | 57.14 | +0.80 | 1.05 | 1 | 1.27 |
+| R_75 | 14 | 8 | 6 | 57.14 | +1.60 | 3.05 | 3 | 1.27 |
+| R_100 | 33 | 17 | 16 | 51.52 | +0.15 | 6.25 | 3 | 1.01 |
+| **Total** | **76** | **40** | **36** | **52.63** | **+2.00** | — | — | — |
+
+**Read this honestly.** At a 1.95× payout the breakeven win rate is
+**51.28%**. The observed 52.63% is 1.35 points above breakeven on 76 trades —
+well inside the noise band for that sample size. This is **not** evidence of
+an edge. The sample covers roughly 17 hours on five synthetic indices; it says
+nothing about next week.
+
+Assumptions behind those numbers: entry at the **next bar's open**, 1-minute
+expiry, tie = loss, constant 1.95× payout, no slippage. See
+[Limitations](#14-limitations).
+
+---
+
+## 9. Architecture
+
+```
+bot.py                 main loop, startup verification, signal ranking
+├── config.py          env loading + validation (frozen dataclass)
+├── logger_config.py   logging with credential redaction
+├── deriv_client.py    REST (OTP, accounts) + WebSocket (market data, trading)
+├── market_data.py     symbol resolution, candle fetch, MTF assembly
+├── indicators.py      EMA, RSI, ATR, S/R pivots, candle patterns
+├── strategy.py        scoring + gating, returns a Signal
+├── risk_manager.py    the trade gate (all limits, restart-safe)
+├── trade_executor.py  proposal validation → buy
+├── trade_monitor.py   follow contract to final state, record P/L
+├── storage.py         SQLite (authoritative) + CSV (export)
+├── backtest.py        replays history through the same strategy code
+│
+├── server.py          launcher: `python server.py` → web control panel
+└── webapp/            the web layer (observes the engine, never trades)
+    ├── server.py      Flask app: REST endpoints + SSE stream
+    ├── bot_service.py runs TradingBot in a thread, publishes state
+    ├── state.py       thread-safe snapshot shared with HTTP handlers
+    ├── settings_store.py  credential validation + atomic .env writer
+    └── static/
+        ├── index.html    single-page dashboard
+        ├── settings.html credentials form
+        ├── app.css       dark theme, no build step
+        ├── app.js        SSE client, polling fallback
+        └── settings.js   settings form logic + CSRF header
+```
+
+**The web layer is additive.** `webapp/` imports the engine and subclasses
+`TradingBot` to publish state; it contains no code that can size, price or
+place a trade. Every purchase still goes through `RiskManager.can_trade` and
+the demo-only guard in `DerivClient.connect`.
+
+**One strategy implementation.** `backtest.py` imports `strategy.Strategy`
+and `indicators` unchanged. Only the data source and the execution model
+differ. If the backtest and the live bot ever disagree, it is a bug in the
+execution model, not a second strategy.
+
+**Restart safety.** All risk state lives in SQLite: daily P/L, trade count,
+consecutive losses, pause window, last-trade timestamp, and every contract.
+A restart cannot reset a limit.
+
+---
+
+## 10. Risk model
+
+| Control | Default | Enforced in |
+|---|---|---|
+| Fixed stake, no escalation | $1 | `risk_manager.check_stake` |
+| Max open contracts | 3 | `check_open_contracts` |
+| Daily loss limit | $5 | `check_daily_loss` |
+| Daily take-profit | Disabled by default | `check_daily_profit_target` |
+| Consecutive-loss stop | 3 | `check_consecutive_losses` |
+| Pause after streak | 60 min | `check_pause` |
+| Cooldown between entries | 60 s | `check_cooldown` |
+| Daily trade cap | 20 | `check_daily_trade_count` |
+| Unresolved-contract block | always | `check_unresolved` |
+
+**No martingale. No stake escalation. No averaging down. No recovery trades.**
+There is no code path that increases the stake after a loss — `check_stake`
+rejects any amount that differs from the configured fixed stake, and the
+executor never computes a stake from prior results.
+
+**These controls do not eliminate risk.** They cap the damage from a bad day
+and a losing streak. A broker outage, a gap, or a strategy that is simply
+wrong can still lose money up to the configured limits.
+
+---
+
+## 11. Logs and reports
+
+* **Terminal** — connection status, DEMO confirmation, available markets,
+  EMA/RSI/S-R values, score, direction, stake, contract id, result, daily P/L,
+  streak, remaining trades, and the current pause/stop reason.
+* **`data/bot.log`** — same, with timestamps and module names.
+* **`data/bot.db`** — SQLite: `trades`, `daily_state`, `risk_state`, `events`.
+* **`data/trades.csv`** — append-only trade log for spreadsheets.
+* **`data/backtest_report.csv`** — backtest trades.
+
+Inspect the database:
+
+```bash
+sqlite3 data/bot.db "SELECT contract_id, symbol, direction, status, profit, trading_day FROM trades ORDER BY id DESC LIMIT 20;"
+sqlite3 data/bot.db "SELECT * FROM daily_state;"
+sqlite3 data/bot.db "SELECT * FROM risk_state;"
+```
+
+---
+
+## 12. Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `DERIV_APP_ID is not set` | No `.env` | `cp .env.example .env`, fill it in |
+| `401 Unauthorized` | Bad token, or missing `Deriv-App-ID` header | Regenerate the PAT; confirm the App ID matches the app that issued it |
+| `403 Forbidden` | Token lacks the `trade` scope | Create a new token with `trade` |
+| `DEMO-ONLY: no demo account found` | Token belongs to a real account | Switch to the demo account and create a token there |
+| `No Options accounts found` | No demo account exists | Create one in the Deriv dashboard |
+| `WebSocket connect failed` | Network, proxy, or expired OTP | OTPs last 120s and are single-use; the bot re-requests one on reconnect. Check egress/firewall |
+| `InputValidationFailed: currency` | You added `currency` to `contracts_for` | Remove it — the new API rejects it |
+| `InputValidationFailed: granularity` | Used `granularity=30` | Use 60, 300 or 3600 |
+| `ContractBuyValidationError: at least 0.35` | Stake below the broker minimum | Raise `STAKE` to at least 0.35 — the bot will **not** do this for you |
+| `proposal ask_price != configured stake` | Broker quoted a different size | Check `CURRENCY` and `STAKE`; the bot refuses rather than trading a different size |
+| `contract type CALL not offered` | Market doesn't offer Rise/Fall | The market is skipped; check `contracts_for` |
+| `UNRESOLVED` in logs | Result could not be confirmed | The bot blocks new trades and reconciles on restart. Check the contract in the Deriv dashboard |
+| `paused for another Ns` | Loss streak or cooldown | Wait, or `risk_manager.manual_reset()` |
+| `daily loss limit reached` | Hit `DAILY_LOSS_LIMIT` | Wait for the next trading day (see timezone) |
+| `daily take-profit target reached` | Hit `DAILY_PROFIT_TARGET` | New entries resume on the next trading day (see timezone) |
+| `RateLimit` | Too many requests | Increase `SCAN_INTERVAL_SECONDS` |
+| `No tradable markets` | All indices unavailable/suspended | Check `active_symbols`; the bot logs each skip reason |
+
+---
+
+## 13. Testing
+
+```bash
+pytest -q            # 114 tests
+pytest -v            # verbose
+```
+
+**114 tests pass** (verified on Python 3.11.15). Coverage:
+
+| File | Tests | What it proves |
+|---|---|---|
+| `test_indicators.py` | 30 | EMA/RSI/ATR against reference values, S/R pivots, candle patterns, no look-ahead in EMA |
+| `test_strategy.py` | 20 | Bullish/bearish/neutral conditions, HTF gating, score bounds, ranking, no look-ahead |
+| `test_risk_manager.py` | 33 | Every limit, martingale rejection, **state survives restart** |
+| `test_trade_execution.py` | 31 | Demo rejection, proposal validation, buy-timeout idempotency, unresolved handling, duplicate prevention |
+
+All Deriv responses are mocked. **No network call is made and no purchase is
+possible from the test suite.**
+
+### What was and was not tested
+
+**Tested locally (real execution):**
+* All 16 Python files compile.
+* 114/114 unit and integration tests pass.
+* Config validation rejects bad indices, EMA ordering, invalid timezones.
+* Startup exits 2 with no credentials; exits 1 with a bad token (real 401
+  from Deriv).
+* The backtester ran against **real** Deriv candles for all five indices and
+  produced the table in §8.
+* The public WebSocket endpoint was probed directly: `active_symbols`,
+  `candles`, `contracts_for`, `proposal` all verified, including the
+  `currency`/`product_type`/`granularity` rejections.
+
+**Requires a live Deriv demo account (NOT performed here):**
+* Authenticated connection, OTP issuance, and demo verification against a
+  real account.
+* An actual purchase, contract monitoring, and settlement.
+* Reconnect behaviour under a real network drop.
+
+**Could not be performed:**
+* Any real-money trading — by design, and the code refuses it.
+
+---
+
+## 14. Limitations
+
+* **Synthetic indices are random walks with a defined volatility.** A
+  trend-following strategy on a random walk has no structural edge. The
+  backtest in §8 is consistent with that.
+* **Payout is modelled as a constant 1.95×.** Real payouts vary by symbol,
+  volatility and time of day. A lower payout raises the breakeven win rate.
+* **Slippage is not modelled.** Synthetic indices have no order book, but the
+  entry is the next bar's open, which is an approximation.
+* **Ties count as losses.** This is conservative and matches the broker's
+  behaviour for at-the-money expiry.
+* **The backtest sample is small** (~17 hours, 76 trades). It is not evidence
+  of an edge in either direction.
+* **No walk-forward / out-of-sample split is automated.** The CLI runs a
+  single in-sample pass. Treat any result as descriptive, not predictive.
+* **Concurrent positions increase exposure.** The bot can open up to the
+  configured `MAX_OPEN_CONTRACTS` limit (default 3, configurable from 1 to 5).
+* **The strategy is fixed.** There is no parameter optimisation loop, and
+  adding one would invite overfitting.
+
+---
+
+## 15. Risk warning
+
+> **Trading derivative products carries a high risk of losing money rapidly.**
+> You can lose more than your initial deposit. Past performance — including
+> any backtest or demo result — does not guarantee future results. This
+> software is provided for educational purposes. It is not financial advice.
+> You are solely responsible for your own trading decisions and for your
+> compliance with the regulations that apply to you.
+
+The bot is demo-only. Keep it that way until you have a strategy with a
+demonstrated, out-of-sample edge — and even then, size positions so that being
+wrong is survivable.
+
+---
+
+## 16. Web UI
+
+A local control panel so you can run and watch the bot from a browser instead
+of reading terminal output. It is a **layer on top of the engine** — the
+strategy, risk manager, executor and monitor are unchanged.
+
+### Start it
+
+```bash
+python server.py                 # http://127.0.0.1:8000
+python server.py --port 9000     # different port
+python server.py --host 0.0.0.0  # LAN access — prints a security warning
+```
+
+The panel prints its URL on startup. Open it, press **Start**, and the bot
+connects exactly as `python bot.py` would.
+
+### Deploy on Render
+
+The repository includes `render.yaml` for a single-instance Render Web
+Service. Push this project directory to GitHub, then in Render choose
+**New → Blueprint** and select that repository. Render will request values
+for `DERIV_APP_ID`, `DERIV_API_TOKEN`, `DASHBOARD_USERNAME`, and
+`DASHBOARD_PASSWORD`. Use a demo-scope Deriv token and a strong, unique
+dashboard password. Do not commit these values to GitHub.
+
+The Blueprint uses Gunicorn, binds to Render's `$PORT`, enables the demo
+account guard, and stores SQLite data and logs on `/var/data`. Its persistent
+disk requires a paid Render service. Keep the service at one instance because
+the bot and its SQLite database are single-instance. After deployment, open
+the `onrender.com` URL, sign in with the dashboard credentials, and press
+**Start**; deployment does not start trading automatically.
+
+Render requires authentication for the public dashboard. Requests are
+protected with HTTP Basic Authentication, while Render's `/healthz` endpoint
+is public for service health checks. The dashboard uses HTTPS through Render
+and marks its CSRF cookie secure.
+
+**Why Flask, not FastAPI.** The engine is synchronous: `websocket-client`
+blocks on its own reader thread and SQLite access is synchronous. Async
+endpoints would only wrap blocking calls, and FastAPI would add a mandatory
+Uvicorn worker and an ASGI/WSGI bridge for no benefit. Flask's threaded server
+maps one request per thread onto this workload cleanly, and Server-Sent Events
+are a plain generator response.
+
+### Panels
+
+| Panel | What it shows |
+|---|---|
+| **Demo banner** | Permanent, non-dismissible. Turns into a red **NOT A DEMO ACCOUNT** banner if the guard blocks the connection. |
+| **Connection / account** | Login ID, currency, balance. The token is never sent to the browser. |
+| **Controls** | Start, Pause, Resume, Stop, plus **Reset loss pause**. |
+| **Risk** | Daily P/L, loss limit remaining (with a bar), consecutive losses vs. limit, trades used vs. cap, cooldown, open contracts, and the exact `blocked_by` reason. |
+| **Open contracts** | One row per position with symbol, direction, stake, payout, contract ID, entry time, signal score, and a live countdown to expiry. |
+| **Market scanner** | All five indices: price, EMA20/50/200, RSI, support, resistance, score, direction, 1m/1h trend, and why it did or didn't fire. Hover a row for the full reason list. |
+| **Trade history** | From SQLite, with P/L and result. Download CSV. |
+| **Backtest** | Run the backtester from the UI. Summary table plus the assumptions and limitations side by side, and a CSV download. |
+| **Log stream** | Live tail of the bot log, auto-refreshing. |
+| **Settings** | Enter `DERIV_APP_ID` and a demo `DERIV_API_TOKEN` in the browser. Validates the format, optionally verifies with Deriv (refusing a real-money account), and writes `.env` atomically with mode `0600`. The token is never echoed back. |
+
+Live updates use **Server-Sent Events** (`/api/events`); if SSE fails twice the
+page falls back to polling `/api/status` every 2 seconds and retries SSE after
+15 seconds.
+
+### API endpoints
+
+All responses use `{"ok": true, "data": …}` or `{"ok": false, "error": …, "code": …}`.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/` | The dashboard |
+| GET | `/settings` | The credentials page (also sets the CSRF cookie) |
+| GET | `/api/settings` | Config state — booleans and non-secret values only |
+| POST | `/api/settings` | Validate + save credentials (CSRF + host guard required) |
+| POST | `/api/settings/trading` | Save stake, daily P/L limits, and maximum simultaneous contracts (CSRF + host guard required) |
+| GET | `/api/health` | Liveness + bot state |
+| GET | `/api/status` | Full snapshot (account, risk, scanner, contract) |
+| GET | `/api/risk` | Risk numbers with derived gauges |
+| GET | `/api/scanner` | Per-market signal table |
+| GET | `/api/trades` | Recent trades |
+| GET | `/api/trades.csv` | Trade history as CSV |
+| GET | `/api/logs?since=<epoch>` | Log lines newer than `since` |
+| GET | `/api/backtest` | Last backtest result |
+| GET | `/api/backtest.csv` | Backtest trades as CSV |
+| GET | `/api/events` | SSE stream |
+| POST | `/api/bot/start` | Start the engine |
+| POST | `/api/bot/stop` | Stop cleanly (monitors open contracts through settlement) |
+| POST | `/api/bot/pause` | Pause new trades, keep the connection |
+| POST | `/api/bot/resume` | Resume |
+| POST | `/api/risk/reset` | Clear the loss streak and pause window |
+| POST | `/api/backtest/run` | Start a backtest (`{"count":1000,"payout":1.95}`) |
+
+### Stopping
+
+Press **Stop** in the UI, or `Ctrl-C` in the terminal running `server.py`.
+Stop is cooperative: the bot finishes monitoring open contracts, closes the
+WebSocket, exports the CSV and closes storage. If a contract cannot be
+confirmed within the timeout, the stop reports an error rather than pretending
+it succeeded.
+
+### Security notes
+
+* Binds **127.0.0.1** by default. Any other host prints a warning — the panel
+  has **no authentication**, so anyone who can reach it can control the bot.
+* The API token is read by the server only. It is never included in any JSON
+  response, never logged (a redaction filter scrubs `Bearer …`, `otp=…` and
+  `"token": "…"`), and `/api/status` reports only booleans about whether
+  credentials exist.
+* A `Host` header check rejects non-loopback/LAN hosts, which blocks
+  DNS-rebinding attacks against the local panel.
+* **No endpoint can place a trade.** The only path to trading is
+  `/api/bot/start`, which starts the unmodified engine. There is no "buy now"
+  button, and no way to relax a risk check from the UI.
+* The demo-only guard is unchanged: the panel cannot enable real-money trading.
+
+### Settings page
+
+`/settings` lets you enter credentials in the browser instead of editing
+`.env` by hand. It is reachable from the nav on every page.
+
+**What it does**
+
+1. Validates `DERIV_APP_ID` is numeric (and rejects the legacy `1089`).
+2. Validates the token *format*: alphanumeric, 15+ characters, and rejects
+   obvious placeholders (`invalid_placeholder_token`, `your_token_here`, …).
+3. Optionally calls Deriv to confirm the token works **and that a demo account
+   exists**. A real-money-only token is refused and nothing is written.
+4. Writes `.env` atomically: `.env.tmp` → `fsync` → `os.replace`, mode `0600`.
+   Comments, blank lines and unrelated keys are preserved byte-for-byte.
+5. Saves non-secret trading settings separately, without requiring the API
+   token again. Stop and start the bot to apply updated stake and P/L limits.
+
+**What it never does**
+
+* Never returns the token, not even masked. `/api/settings` reports
+  `token_present: true` and a fixed `••••••••` placeholder.
+* Never logs the token. Error messages are passed through `scrub()`, which
+  removes the known secret and any `Bearer …` / `otp=…` pattern.
+* Never weakens the demo guard. The guard lives in `DerivClient.connect` and is
+  untouched; the settings check is an *earlier, friendlier* refusal.
+* Never places a trade. Saving credentials does not start the bot.
+
+**Protection**
+
+| Guard | Behaviour |
+|---|---|
+| CSRF | Double-submit: `X-CSRF-Token` header must equal the `dv_csrf` cookie (`SameSite=Strict`). Missing or mismatched → `403 csrf_failed`. |
+| Host header | The existing DNS-rebinding guard applies to `/settings` and `/api/settings` too. A foreign `Host` → `403 host_not_allowed`. |
+| File mode | `0600`, set on the temp file before the secret is written. |
+| Atomicity | `os.replace` — a crash mid-write cannot leave a half-written `.env`. |
+
+### Verified
+
+* Server boots with no `.env` and shows a clear **NOT CONFIGURED** state
+  instead of crashing; `POST /api/bot/start` returns `400 not_configured`.
+* With a `.env` present, the banner reports credentials found and Start
+  reaches Deriv (a placeholder token produced a real `401`).
+* A canary token planted in `.env` was **not found in any of 18 endpoint
+  responses or the server log** (0 matches).
+* All 114 existing tests still pass with the web layer added.
+
+**Settings page, exercised over real HTTP** (server running, `curl`):
+
+| Request | Result |
+|---|---|
+| `GET /settings` | `200`, 6,968 b, sets `dv_csrf` (43 chars) |
+| `GET /api/settings` (no creds) | `200` `{"configured":false,"token_hint":null,…}` |
+| `POST` without CSRF header | `403 csrf_failed` |
+| `POST` with wrong CSRF | `403 csrf_failed` |
+| `POST` app_id `abc` | `422 invalid_app_id` |
+| `POST` token `invalid_placeholder_token` | `422 invalid_token` |
+| `POST` with `Host: evil.example.com` | `403 host_not_allowed` |
+| `POST` live check, fake token | `422 auth_failed` — a **real 401 from Deriv**; `.env` not written |
+| `POST` valid save | `200`, `file_mode 0o600`, `preserved_keys [CURRENCY, LOG_LEVEL]` |
+
+After the save, `.env` contained the hand-written comment and both unrelated
+keys unchanged, the two credentials, and the optional settings — mode `-rw-------`,
+no `.env.*.tmp` left behind. `/api/status` immediately reported
+`configured: true` **without a restart**, and `POST /api/bot/start` then reached
+Deriv's real `401` instead of `not_configured`.
+
+**Token leak scan:** 71,274 bytes across 13 responses (`/`, `/settings`, 8 API
+endpoints, 3 static files) — **0 matches** for the token value, `DERIV_API_TOKEN=`,
+`Bearer ` and `otp=`. Server log: **0 matches**. The only `token` strings are
+setup prose, the `token_present` boolean, and the `••••••••` placeholder.
+
+**Test suite:** `157 passed` (114 existing + 43 new settings tests).

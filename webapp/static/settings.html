@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Settings — Deriv Volatility Bot</title>
+<meta name="robots" content="noindex, nofollow">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<!-- DEMO-ONLY BANNER — identical to the dashboard, never dismissible -->
+<div id="demo-banner" class="demo-banner" role="status">
+  <span class="demo-dot"></span>
+  <strong>DEMO MODE ONLY</strong>
+  <span class="demo-sep">·</span>
+  <span>This bot refuses to trade a real-money account. There is no setting to change that.</span>
+</div>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-mark">DV</div>
+    <div class="brand-text">
+      <h1>Volatility Bot</h1>
+      <span class="brand-sub">Deriv · Rise/Fall · 1 min</span>
+    </div>
+  </div>
+
+  <nav class="nav">
+    <a href="/" class="nav-link">Dashboard</a>
+    <a href="/settings" class="nav-link nav-link-active" aria-current="page">Settings</a>
+  </nav>
+
+  <div class="topbar-right">
+    <div class="conn" id="conn">
+      <span class="conn-dot" id="conn-dot"></span>
+      <span id="conn-label">Checking…</span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section class="card">
+    <div class="card-head">
+      <h2>Credentials</h2>
+      <span class="badge" id="cfg-badge">—</span>
+    </div>
+
+    <p class="muted small">
+      These values are written to <code>.env</code> on the machine running this
+      server, with file mode <code>0600</code>. The token is never sent back to
+      this page — not even masked — and never appears in a log line.
+    </p>
+
+    <div class="settings-state" id="state-grid">
+      <div><span class="muted small">App ID</span><b id="st-appid">—</b></div>
+      <div><span class="muted small">Token</span><b id="st-token">—</b></div>
+      <div><span class="muted small">.env file</span><b id="st-env">—</b></div>
+      <div><span class="muted small">Bot</span><b id="st-bot">—</b></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>Update credentials</h2>
+    </div>
+
+    <form id="settings-form" autocomplete="off" novalidate>
+
+      <div class="field">
+        <label for="f-appid">DERIV_APP_ID</label>
+        <input type="text" id="f-appid" name="app_id" inputmode="numeric"
+               placeholder="e.g. 123456" autocomplete="off" spellcheck="false">
+        <div class="hint">
+          Numeric. Create an application at
+          <a href="https://developers.deriv.com" target="_blank" rel="noopener noreferrer">developers.deriv.com</a>
+          (type <b>PAT</b>). The legacy <code>1089</code> is rejected by the current API.
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="f-token">DERIV_API_TOKEN</label>
+        <div class="input-row">
+          <input type="password" id="f-token" name="token"
+                 placeholder="Paste the token from your DEMO account"
+                 autocomplete="new-password" spellcheck="false">
+          <button type="button" class="btn btn-sm" id="btn-reveal"
+                  aria-label="Show or hide the token">Show</button>
+        </div>
+        <div class="hint">
+          Alphanumeric, 15+ characters. Create it in the Deriv dashboard with
+          the <code>trade</code> scope, <b>while switched to your demo
+          (virtual) account</b>. A real-account token is refused.
+        </div>
+      </div>
+
+      <details class="advanced">
+        <summary>Trading and risk settings</summary>
+        <div class="field-grid">
+          <div class="field">
+            <label for="f-stake">STAKE</label>
+            <input type="number" id="f-stake" name="stake" step="0.01" min="0.01" max="1000">
+            <div class="hint">Per-trade stake. 0.01 – 1000.</div>
+          </div>
+          <div class="field">
+            <label for="f-max-open">Maximum open contracts</label>
+            <input type="number" id="f-max-open" name="max_open_contracts" step="1" min="1" max="5">
+            <div class="hint">Maximum simultaneous contracts, from 1 to 5.</div>
+          </div>
+          <div class="field">
+            <label for="f-take-profit">Daily take-profit target</label>
+            <input type="number" id="f-take-profit" name="daily_profit_target" step="0.01" min="0" max="100000">
+            <div class="hint">Pause new entries for the day after realized profit reaches this amount. Open contracts still settle. Set 0 to disable.</div>
+          </div>
+          <div class="field">
+            <label for="f-loss">Daily stop-loss limit</label>
+            <input type="number" id="f-loss" name="daily_loss_limit" step="0.01" min="0.01">
+            <div class="hint">Pause new entries for the day when realized loss reaches this amount. Open contracts still settle.</div>
+          </div>
+          <div class="field">
+            <label for="f-trades">MAX_TRADES_PER_DAY</label>
+            <input type="number" id="f-trades" name="max_trades_per_day" step="1" min="1" max="1000">
+            <div class="hint">Hard cap on trades per trading day.</div>
+          </div>
+          <div class="field">
+            <label for="f-streak">MAX_CONSECUTIVE_LOSSES</label>
+            <input type="number" id="f-streak" name="max_consecutive_losses" step="1" min="1" max="50">
+            <div class="hint">Pause after this many losses in a row.</div>
+          </div>
+          <div class="field field-wide">
+            <label>Market scanner</label>
+            <div class="hint">Automatically discovers and rotates through all active Deriv synthetic-index markets, including Volatility, Step, Crash/Boom, Jump and Range Break where available.</div>
+          </div>
+        </div>
+        <div class="form-actions">
+          <button type="button" class="btn btn-primary" id="btn-save-trading">Save trading settings</button>
+          <span class="muted small">Changes apply on the next bot start; stop and start the bot if it is running.</span>
+        </div>
+      </details>
+
+      <label class="check">
+        <input type="checkbox" id="f-verify" checked>
+        <span>Verify with Deriv before saving (recommended — confirms the
+        account is demo)</span>
+      </label>
+
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary" id="btn-save">Save credentials</button>
+        <button type="button" class="btn" id="btn-clear">Clear form</button>
+        <span class="muted small" id="save-status"></span>
+      </div>
+    </form>
+
+    <div id="result" class="result" hidden></div>
+  </section>
+
+  <section class="card">
+    <div class="card-head"><h2>How this is protected</h2></div>
+    <ul class="bullets">
+      <li><b>Demo-only, unchanged.</b> The guard lives in the trading client and
+          is not touched by this page. A real-money account is refused at
+          connect time regardless of what is saved here.</li>
+      <li><b>Token never leaves the server.</b> It is read from <code>.env</code>
+          by the server process only. No API response contains it.</li>
+      <li><b>Atomic write.</b> <code>.env.tmp</code> → fsync → rename, mode
+          <code>0600</code>. A crash mid-write cannot corrupt the file, and
+          unrelated keys are preserved.</li>
+      <li><b>CSRF + host guard.</b> The save endpoint requires a same-origin
+          token and rejects any <code>Host</code> that is not loopback/LAN.</li>
+      <li><b>No trade bypass.</b> Saving credentials does not place a trade.
+          Start still runs the full risk manager.</li>
+    </ul>
+  </section>
+
+  <footer class="foot">
+    <p><b>Educational software, not financial advice.</b> Trading derivatives carries a high risk of losing money rapidly.</p>
+    <p class="muted small">Local panel · bound to 127.0.0.1 · no authentication (localhost-only by design)</p>
+  </footer>
+
+</main>
+
+<script src="/static/settings.js"></script>
+</body>
+</html>

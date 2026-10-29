@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deriv Volatility Bot — Control Panel</title>
+<meta name="robots" content="noindex, nofollow">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<!-- ==================================================================
+     DEMO-ONLY BANNER — deliberately unmissable and never dismissible.
+     ================================================================== -->
+<div id="demo-banner" class="demo-banner" role="status">
+  <span class="demo-dot"></span>
+  <strong>DEMO MODE ONLY</strong>
+  <span class="demo-sep">·</span>
+  <span>This bot refuses to trade a real-money account. There is no setting to change that.</span>
+</div>
+
+<!-- Shown only when the guard blocks the connection or the account is not demo -->
+<div id="danger-banner" class="danger-banner" hidden>
+  <strong id="danger-title">NOT A DEMO ACCOUNT</strong>
+  <span id="danger-text"></span>
+</div>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-mark">DV</div>
+    <div class="brand-text">
+      <h1>Volatility Bot</h1>
+      <span class="brand-sub">Deriv · Rise/Fall · 1 min</span>
+    </div>
+  </div>
+
+  <nav class="nav">
+    <a href="/" class="nav-link nav-link-active" aria-current="page">Dashboard</a>
+    <a href="/settings" class="nav-link">Settings</a>
+  </nav>
+
+  <div class="topbar-right">
+    <div class="conn" id="conn">
+      <span class="conn-dot" id="conn-dot"></span>
+      <span id="conn-label">Connecting…</span>
+    </div>
+    <div class="account" id="account-box" hidden>
+      <div class="account-row"><span>Account</span><b id="acct-id">—</b></div>
+      <div class="account-row"><span>Balance</span><b id="acct-bal">—</b></div>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <!-- Not-configured state -->
+  <section class="card notice" id="setup-card" hidden>
+    <div class="notice-head">
+      <span class="badge badge-warn">NOT CONFIGURED</span>
+      <h2>No credentials found</h2>
+    </div>
+    <p id="setup-text">The panel is running, but the bot has no credentials yet.</p>
+    <ol class="steps">
+      <li>Create an application at <code>developers.deriv.com</code> and copy its <b>App ID</b>.</li>
+      <li>In the Deriv dashboard, create an API token <b>from your demo account</b> with the <code>trade</code> scope.</li>
+      <li>Copy <code>.env.example</code> to <code>.env</code> and fill in both values — or enter them on the <a href="/settings">Settings</a> page.</li>
+      <li>Restart the panel, then press <b>Start</b>.</li>
+    </ol>
+    <p class="muted small">Credentials are read by the server only. They are never sent to this page.</p>
+  </section>
+
+  <!-- Controls -->
+  <section class="card control-card">
+    <div class="control-row">
+      <div class="control-left">
+        <span class="badge" id="state-badge">STOPPED</span>
+        <div class="state-detail" id="state-detail">Not started.</div>
+      </div>
+      <div class="control-btns">
+        <button class="btn btn-primary" id="btn-start">Start</button>
+        <button class="btn" id="btn-pause" disabled>Pause</button>
+        <button class="btn" id="btn-resume" disabled>Resume</button>
+        <button class="btn btn-danger" id="btn-stop" disabled>Stop</button>
+      </div>
+    </div>
+    <div class="control-foot">
+      <span class="muted small" id="uptime">—</span>
+      <span class="muted small" id="scan-count">—</span>
+      <button class="linkish" id="btn-reset">Reset loss pause</button>
+    </div>
+  </section>
+
+  <!-- Error -->
+  <section class="card error-card" id="error-card" hidden>
+    <h3 id="error-title">Error</h3>
+    <p id="error-text"></p>
+  </section>
+
+  <!-- Risk panel -->
+  <section class="card">
+    <div class="card-head">
+      <h2>Risk</h2>
+      <span class="muted small" id="risk-day">—</span>
+    </div>
+    <div class="risk-grid">
+      <div class="metric">
+        <div class="metric-label">Daily P/L</div>
+        <div class="metric-value" id="m-pnl">—</div>
+        <div class="bar"><div class="bar-fill" id="bar-pnl"></div></div>
+        <div class="metric-sub" id="m-pnl-sub">—</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Loss limit left</div>
+        <div class="metric-value" id="m-lossleft">—</div>
+        <div class="bar"><div class="bar-fill" id="bar-loss"></div></div>
+        <div class="metric-sub" id="m-loss-sub">—</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Take-profit left</div>
+        <div class="metric-value" id="m-profitleft">—</div>
+        <div class="bar"><div class="bar-fill" id="bar-profit"></div></div>
+        <div class="metric-sub" id="m-profit-sub">—</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Consecutive losses</div>
+        <div class="metric-value" id="m-streak">—</div>
+        <div class="bar"><div class="bar-fill" id="bar-streak"></div></div>
+        <div class="metric-sub" id="m-streak-sub">—</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Trades today</div>
+        <div class="metric-value" id="m-trades">—</div>
+        <div class="bar"><div class="bar-fill" id="bar-trades"></div></div>
+        <div class="metric-sub" id="m-trades-sub">—</div>
+      </div>
+    </div>
+    <div class="risk-foot">
+      <div><span class="muted small">Cooldown</span> <b id="m-cooldown">—</b></div>
+      <div><span class="muted small">Open contracts</span> <b id="m-open">—</b></div>
+      <div><span class="muted small">Blocked by</span> <b id="m-blocked">—</b></div>
+    </div>
+  </section>
+
+  <!-- Trade sizing and daily P/L controls -->
+  <section class="card">
+    <div class="card-head">
+      <h2>Trade settings</h2>
+      <span class="muted small" id="trade-settings-status">Loading settings…</span>
+    </div>
+    <div class="field-grid trade-settings-grid">
+      <div class="field">
+        <label for="dash-stake">Stake per trade</label>
+        <input type="number" id="dash-stake" min="0.01" max="1000" step="0.01" inputmode="decimal">
+        <div class="hint">Fixed amount for each contract.</div>
+      </div>
+      <div class="field">
+        <label for="dash-max-open">Max simultaneous contracts</label>
+        <input type="number" id="dash-max-open" min="1" max="5" step="1" inputmode="numeric">
+        <div class="hint">Set 2–5 to allow concurrent trades.</div>
+      </div>
+      <div class="field">
+        <label for="dash-stop-loss">Daily stop loss</label>
+        <input type="number" id="dash-stop-loss" min="0.01" max="100000" step="0.01" inputmode="decimal">
+        <div class="hint">Pause new entries after this realized daily loss.</div>
+      </div>
+      <div class="field">
+        <label for="dash-take-profit">Daily take profit</label>
+        <input type="number" id="dash-take-profit" min="0" max="100000" step="0.01" inputmode="decimal">
+        <div class="hint">Pause new entries after this realized daily profit. Use 0 to disable.</div>
+      </div>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-primary" id="btn-save-trade-settings">Save trade settings</button>
+      <span class="muted small">Saved values apply the next time the bot starts. Open contracts settle normally.</span>
+    </div>
+  </section>
+
+  <!-- Open contract -->
+  <section class="card" id="contract-card" hidden>
+    <div class="card-head">
+      <h2>Open contracts</h2>
+      <span class="badge badge-live" id="ct-count">0 open</span>
+    </div>
+    <div class="table-scroll">
+      <table class="tbl">
+        <thead><tr>
+          <th>Market</th><th>Direction</th><th class="num">Stake</th>
+          <th class="num">Payout</th><th>Contract ID</th><th>Entry</th>
+          <th class="num">Expires in</th><th class="num">Score</th>
+        </tr></thead>
+        <tbody id="open-contracts-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Scanner -->
+  <section class="card">
+    <div class="card-head">
+      <h2>Market scanner</h2>
+      <span class="muted small" id="scan-time">—</span>
+    </div>
+    <div class="table-scroll">
+      <table class="tbl" id="scanner-table">
+        <thead>
+          <tr>
+            <th>Market</th><th class="num">Price</th>
+            <th class="num">EMA20</th><th class="num">EMA50</th><th class="num">EMA200</th>
+            <th class="num">RSI</th><th class="num">Support</th><th class="num">Resistance</th>
+            <th class="num">Score</th><th>Dir</th><th>Trend 1m/1h</th><th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="scanner-body">
+          <tr><td colspan="12" class="empty">Waiting for the first scan…</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="muted small footnote">
+      Score is a confluence count out of 100, not a win probability. Hover a row for the full reason list.
+    </p>
+  </section>
+
+  <!-- Trades -->
+  <section class="card">
+    <div class="card-head">
+      <h2>Trade history</h2>
+      <a class="linkish" href="/api/trades.csv" download>Download CSV</a>
+    </div>
+    <div class="table-scroll">
+      <table class="tbl">
+        <thead>
+          <tr>
+            <th>Time</th><th>Market</th><th>Dir</th><th class="num">Stake</th>
+            <th class="num">Payout</th><th class="num">P/L</th><th>Result</th><th class="num">Score</th>
+          </tr>
+        </thead>
+        <tbody id="trades-body">
+          <tr><td colspan="8" class="empty">No trades yet.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Backtest -->
+  <section class="card">
+    <div class="card-head">
+      <h2>Backtest</h2>
+      <div class="head-actions">
+        <button class="btn btn-sm" id="btn-backtest">Run backtest</button>
+        <a class="linkish" href="/api/backtest.csv" download>Download CSV</a>
+      </div>
+    </div>
+    <div id="bt-empty" class="muted small">No backtest run yet. Uses live public candle data — no credentials needed.</div>
+    <div id="bt-running" hidden class="bt-running"><span class="spinner"></span> Running backtest…</div>
+    <div id="bt-result" hidden>
+      <div class="bt-summary" id="bt-summary"></div>
+      <div class="table-scroll">
+        <table class="tbl">
+          <thead>
+            <tr>
+              <th>Market</th><th class="num">Trades</th><th class="num">W/L</th>
+              <th class="num">Win %</th><th class="num">Net</th>
+              <th class="num">Return %</th><th class="num">Max DD</th><th class="num">Loss run</th>
+            </tr>
+          </thead>
+          <tbody id="bt-body"></tbody>
+        </table>
+      </div>
+      <div class="assumptions">
+        <div>
+          <h4>Assumptions</h4>
+          <ul id="bt-assumptions"></ul>
+        </div>
+        <div>
+          <h4>Limitations</h4>
+          <ul id="bt-limitations"></ul>
+        </div>
+      </div>
+      <p class="warn-text" id="bt-warn"></p>
+    </div>
+  </section>
+
+  <!-- Logs -->
+  <section class="card">
+    <div class="card-head">
+      <h2>Log stream</h2>
+      <label class="toggle"><input type="checkbox" id="log-follow" checked> Follow</label>
+    </div>
+    <div class="logbox" id="logbox"><div class="muted small">No log output yet.</div></div>
+  </section>
+
+  <footer class="foot">
+    <p><b>Educational software, not financial advice.</b> Trading derivatives carries a high risk of losing money rapidly.
+    Backtest and demo results do not predict live outcomes.</p>
+    <p class="muted small">Local panel · bound to 127.0.0.1 · no authentication (it is localhost-only by design)</p>
+  </footer>
+
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
