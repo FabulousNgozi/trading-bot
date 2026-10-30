@@ -54,6 +54,8 @@ CREATE TABLE IF NOT EXISTS trades (
     profit            REAL,
     signal_score      INTEGER,
     signal_reasons    TEXT,
+    strategy_variant  TEXT    NOT NULL DEFAULT 'baseline',
+    strategy_id       TEXT    NOT NULL DEFAULT 'trend_confluence_v1',
     trading_day       TEXT    NOT NULL,
     opened_at         TEXT    NOT NULL,
     closed_at         TEXT,
@@ -82,6 +84,24 @@ CREATE TABLE IF NOT EXISTS events (
     event      TEXT NOT NULL,
     detail     TEXT
 );
+
+CREATE TABLE IF NOT EXISTS ai_duration_studies (
+    symbol                 TEXT NOT NULL,
+    strategy_id            TEXT NOT NULL,
+    strategy_variant       TEXT NOT NULL,
+    duration_minutes       INTEGER NOT NULL,
+    data_end_epoch         INTEGER NOT NULL,
+    train_trades           INTEGER NOT NULL DEFAULT 0,
+    train_wins             INTEGER NOT NULL DEFAULT 0,
+    train_net_profit       REAL NOT NULL DEFAULT 0,
+    validation_trades      INTEGER NOT NULL DEFAULT 0,
+    validation_wins        INTEGER NOT NULL DEFAULT 0,
+    validation_win_rate    REAL NOT NULL DEFAULT 0,
+    validation_net_profit  REAL NOT NULL DEFAULT 0,
+    validation_drawdown    REAL NOT NULL DEFAULT 0,
+    updated_at             TEXT NOT NULL,
+    PRIMARY KEY (symbol, strategy_id, strategy_variant, duration_minutes)
+);
 """
 
 
@@ -102,6 +122,8 @@ class TradeRecord:
     profit: Optional[float] = None
     signal_score: Optional[int] = None
     signal_reasons: str = ""
+    strategy_variant: str = "baseline"
+    strategy_id: str = "trend_confluence_v1"
     trading_day: str = ""
     opened_at: str = ""
     closed_at: Optional[str] = None
@@ -123,6 +145,16 @@ class Storage:
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(SCHEMA)
+        columns = {row["name"] for row in self._conn.execute(
+            "PRAGMA table_info(trades)").fetchall()}
+        if "strategy_variant" not in columns:
+            self._conn.execute(
+                "ALTER TABLE trades ADD COLUMN strategy_variant "
+                "TEXT NOT NULL DEFAULT 'baseline'")
+        if "strategy_id" not in columns:
+            self._conn.execute(
+                "ALTER TABLE trades ADD COLUMN strategy_id "
+                "TEXT NOT NULL DEFAULT 'trend_confluence_v1'")
         self._conn.commit()
 
     # ------------------------------------------------------------------
@@ -248,14 +280,16 @@ class Storage:
             """INSERT INTO trades
                (contract_id, symbol, index_value, direction, stake, payout,
                 buy_price, duration, duration_unit, entry_spot, exit_spot,
-                status, profit, signal_score, signal_reasons, trading_day,
-                opened_at, closed_at, resolved)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                status, profit, signal_score, signal_reasons, strategy_variant,
+                strategy_id,
+                trading_day, opened_at, closed_at, resolved)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (rec.contract_id, rec.symbol, rec.index_value, rec.direction,
              rec.stake, rec.payout, rec.buy_price, rec.duration,
              rec.duration_unit, rec.entry_spot, rec.exit_spot, rec.status,
-             rec.profit, rec.signal_score, rec.signal_reasons, rec.trading_day,
-             rec.opened_at, rec.closed_at, rec.resolved),
+             rec.profit, rec.signal_score, rec.signal_reasons,
+             rec.strategy_variant, rec.strategy_id, rec.trading_day, rec.opened_at,
+             rec.closed_at, rec.resolved),
         )
         self._conn.commit()
         return int(cur.lastrowid)
@@ -306,6 +340,120 @@ class Storage:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def resolved_trade_performance(self, strategy_id: Optional[str] = None
+                                   ) -> Dict[str, Dict[str, float]]:
+        """Return resolved outcomes grouped by market and direction."""
+        sql = """SELECT symbol, direction, COUNT(*) AS trades,
+                      SUM(CASE WHEN profit > 0 THEN 1 ELSE 0 END) AS wins
+               FROM trades
+               WHERE resolved = 1 AND status IN ('won', 'lost', 'sold')
+                     AND profit IS NOT NULL"""
+        params = ()
+        if strategy_id:
+            sql += " AND strategy_id = ?"
+            params = (strategy_id,)
+        sql += " GROUP BY symbol, direction"
+        rows = self._conn.execute(sql, params).fetchall()
+        return {
+            f"{row['symbol']}:{row['direction']}": {
+                "trades": int(row["trades"]),
+                "wins": int(row["wins"] or 0),
+            }
+            for row in rows
+        }
+
+    def resolved_policy_performance(self, strategy_id: str
+                                    ) -> Dict[str, Dict[str, float]]:
+        """Research resolved outcomes by the strategy variant that placed them."""
+        rows = self._conn.execute(
+            """SELECT strategy_variant, COUNT(*) AS trades,
+                      SUM(CASE WHEN profit > 0 THEN 1 ELSE 0 END) AS wins,
+                      SUM(profit) AS net_profit
+               FROM trades
+               WHERE strategy_id = ? AND resolved = 1
+                     AND status IN ('won', 'lost', 'sold')
+                     AND profit IS NOT NULL
+               GROUP BY strategy_variant""", (strategy_id,)
+        ).fetchall()
+        return {
+            row["strategy_variant"]: {
+                "trades": int(row["trades"]),
+                "wins": int(row["wins"] or 0),
+                "net_profit": float(row["net_profit"] or 0.0),
+            }
+            for row in rows
+        }
+
+    def save_duration_study(self, symbol: str, strategy_id: str,
+                            strategy_variant: str, data_end_epoch: int,
+                            results: Dict[int, Dict[str, object]]) -> None:
+        """Persist the latest train/validation duration comparison."""
+        now = self.now().isoformat()
+        for duration, row in results.items():
+            self._conn.execute(
+                """INSERT INTO ai_duration_studies
+                   (symbol, strategy_id, strategy_variant, duration_minutes,
+                    data_end_epoch, train_trades, train_wins, train_net_profit,
+                    validation_trades, validation_wins, validation_win_rate,
+                    validation_net_profit, validation_drawdown, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(symbol, strategy_id, strategy_variant,
+                               duration_minutes) DO UPDATE SET
+                     data_end_epoch=excluded.data_end_epoch,
+                     train_trades=excluded.train_trades,
+                     train_wins=excluded.train_wins,
+                     train_net_profit=excluded.train_net_profit,
+                     validation_trades=excluded.validation_trades,
+                     validation_wins=excluded.validation_wins,
+                     validation_win_rate=excluded.validation_win_rate,
+                     validation_net_profit=excluded.validation_net_profit,
+                     validation_drawdown=excluded.validation_drawdown,
+                     updated_at=excluded.updated_at""",
+                (symbol, strategy_id, strategy_variant, duration,
+                 data_end_epoch, int(row.get("train_trades", 0)),
+                 int(row.get("train_wins", 0)),
+                 float(row.get("train_net_profit", 0.0)),
+                 int(row.get("validation_trades", 0)),
+                 int(row.get("validation_wins", 0)),
+                 float(row.get("validation_win_rate", 0.0)),
+                 float(row.get("validation_net_profit", 0.0)),
+                 float(row.get("validation_drawdown", 0.0)), now),
+            )
+        self._conn.commit()
+
+    def get_duration_study(self, symbol: str, strategy_id: str,
+                           strategy_variant: str) -> List[Dict[str, Any]]:
+        rows = self._conn.execute(
+            """SELECT * FROM ai_duration_studies
+               WHERE symbol=? AND strategy_id=? AND strategy_variant=?
+               ORDER BY duration_minutes""",
+            (symbol, strategy_id, strategy_variant),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def resolved_duration_performance(self, symbol: str, strategy_id: str,
+                                      strategy_variant: str
+                                      ) -> Dict[int, Dict[str, float]]:
+        rows = self._conn.execute(
+            """SELECT duration, COUNT(*) AS trades,
+                      SUM(CASE WHEN profit > 0 THEN 1 ELSE 0 END) AS wins,
+                      SUM(profit) AS net_profit
+               FROM trades
+               WHERE symbol=? AND strategy_id=? AND strategy_variant=?
+                     AND resolved=1 AND status IN ('won','lost','sold')
+                     AND profit IS NOT NULL
+               GROUP BY duration""",
+            (symbol, strategy_id, strategy_variant),
+        ).fetchall()
+        return {
+            int(row["duration"]): {
+                "trades": int(row["trades"]),
+                "wins": int(row["wins"] or 0),
+                "net_profit": float(row["net_profit"] or 0.0),
+            }
+            for row in rows
+        }
+
     def all_trades(self) -> List[Dict[str, Any]]:
         rows = self._conn.execute("SELECT * FROM trades ORDER BY id ASC").fetchall()
         return [dict(r) for r in rows]
@@ -331,7 +479,8 @@ class Storage:
         fields = ["contract_id", "symbol", "index_value", "direction", "stake",
                   "payout", "buy_price", "duration", "duration_unit",
                   "entry_spot", "exit_spot", "status", "profit",
-                  "signal_score", "trading_day", "opened_at", "closed_at"]
+                  "signal_score", "trading_day", "opened_at", "closed_at",
+                  "strategy_variant", "strategy_id"]
         with path.open("a", newline="", encoding="utf-8") as fh:
             w = csv.DictWriter(fh, fieldnames=fields)
             if new_file:
@@ -346,7 +495,8 @@ class Storage:
         fields = ["id", "contract_id", "symbol", "index_value", "direction",
                   "stake", "payout", "buy_price", "duration", "duration_unit",
                   "entry_spot", "exit_spot", "status", "profit",
-                  "signal_score", "trading_day", "opened_at", "closed_at",
+                  "signal_score", "strategy_variant", "strategy_id", "trading_day",
+                  "opened_at", "closed_at",
                   "resolved"]
         with open(path, "w", newline="", encoding="utf-8") as fh:
             w = csv.DictWriter(fh, fieldnames=fields, extrasaction="ignore")

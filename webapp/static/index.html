@@ -193,6 +193,17 @@
     </div>
   </section>
 
+  <!-- Adaptive AI brain -->
+  <section class="card" id="brain-card">
+    <div class="card-head">
+      <h2>AI brain</h2>
+      <span class="badge" id="brain-badge">READY</span>
+    </div>
+    <p id="brain-status">Studies settled demo trades and compares bounded strategy profiles.</p>
+    <div id="brain-ranked" class="muted small">Waiting for the bot to scan.</div>
+    <p class="muted small footnote">Baseline uses your configured thresholds. Selective raises the score threshold by 8 and narrows the RSI band. Wide momentum lowers the threshold by 5 and widens the RSI band. For each signaled market, the learner also compares 1, 2, 3 and 5 minute expiries on chronological train/validation candles; it keeps your configured duration until results have enough trades and positive returns. It cannot change stake or risk limits. Past results do not predict future results.</p>
+  </section>
+
   <!-- Scanner -->
   <section class="card">
     <div class="card-head">
@@ -206,11 +217,11 @@
             <th>Market</th><th class="num">Price</th>
             <th class="num">EMA20</th><th class="num">EMA50</th><th class="num">EMA200</th>
             <th class="num">RSI</th><th class="num">Support</th><th class="num">Resistance</th>
-            <th class="num">Score</th><th>Dir</th><th>Trend 1m/1h</th><th>Status</th>
+            <th class="num">Score</th><th class="num">AI rank</th><th class="num">Duration</th><th>Dir</th><th>Trend 1m/1h</th><th>Status</th>
           </tr>
         </thead>
         <tbody id="scanner-body">
-          <tr><td colspan="12" class="empty">Waiting for the first scan…</td></tr>
+          <tr><td colspan="14" class="empty">Waiting for the first scan…</td></tr>
         </tbody>
       </table>
     </div>
@@ -229,12 +240,12 @@
       <table class="tbl">
         <thead>
           <tr>
-            <th>Time</th><th>Market</th><th>Dir</th><th class="num">Stake</th>
+            <th>Time</th><th>Market</th><th>Dir</th><th>AI strategy</th><th>Duration</th><th class="num">Stake</th>
             <th class="num">Payout</th><th class="num">P/L</th><th>Result</th><th class="num">Score</th>
           </tr>
         </thead>
         <tbody id="trades-body">
-          <tr><td colspan="8" class="empty">No trades yet.</td></tr>
+          <tr><td colspan="10" class="empty">No trades yet.</td></tr>
         </tbody>
       </table>
     </div>

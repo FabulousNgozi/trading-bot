@@ -16,7 +16,8 @@ Scan loop, every SCAN_INTERVAL_SECONDS:
     * refresh every open contract once
     * if risk blocks trading, log why and skip
     * evaluate the next rotating batch of discovered markets
-    * rank actionable signals by score
+    * choose a bounded strategy profile and per-market researched expiry
+    * rank actionable signals by score and settled outcomes
     * open the strongest supported signals up to the configured open-contract limit
     * never re-enter on the same completed candle
 
@@ -33,6 +34,7 @@ import time
 from typing import Dict, List, Optional
 
 from config import Config, ConfigError, ensure_data_dir, load_config
+from ai_brain import AIBrain
 from deriv_client import (
     AuthError,
     DemoAccountRequired,
@@ -59,6 +61,7 @@ class TradingBot:
         self.client = DerivClient(cfg)
         self.market = MarketData(self.client, cfg)
         self.strategy = Strategy(cfg)
+        self.ai_brain = AIBrain(cfg, self.storage)
         self.risk = RiskManager(cfg, self.storage)
         self.executor = TradeExecutor(self.client, cfg, self.risk, self.storage)
         self.monitor = TradeMonitor(self.client, cfg, self.risk, self.storage)
@@ -127,6 +130,8 @@ class TradingBot:
                  self.cfg.max_trades_per_day, self.cfg.cooldown_seconds)
         log.info("Trading day boundary: midnight %s",
                  self.cfg.trading_day_timezone)
+        log.info("Adaptive AI brain: %s",
+                 "enabled" if self.cfg.ai_brain_enabled else "disabled")
         return True
 
     # ==================================================================
@@ -174,7 +179,17 @@ class TradingBot:
             log.info("Paused — %s", decision.reason)
             return
 
-        # 3. Evaluate every market.
+        # 3. Select a bounded strategy profile from resolved demo outcomes.
+        if self.cfg.ai_brain_enabled:
+            policy, scan_strategy, study = self.ai_brain.select_strategy(
+                type(self.strategy)
+            )
+            log.info("AI study: %s | policy stats: %s",
+                     study["status"], study["policy_stats"])
+        else:
+            policy, scan_strategy = "baseline", self.strategy
+
+        # 4. Evaluate every market.
         signals: List[Signal] = []
         for idx, symbol in self.market.next_scan_batch().items():
             try:
@@ -191,10 +206,26 @@ class TradingBot:
                 log.debug("%s: not enough history yet", symbol)
                 continue
 
-            sig = self.strategy.evaluate(symbol, series, index_value=idx)
+            sig = scan_strategy.evaluate(symbol, series, index_value=idx)
+            sig.strategy_variant = policy
+            sig.strategy_id = getattr(scan_strategy, "strategy_id",
+                                      "trend_confluence_v1")
+            if self.cfg.ai_brain_enabled:
+                duration_choice = self.ai_brain.select_duration(
+                    symbol, series, scan_strategy, policy
+                )
+                sig.selected_duration = int(duration_choice["duration"])
+                sig.selected_duration_unit = str(
+                    duration_choice["duration_unit"]
+                )
+                if sig.actionable:
+                    log.info("AI duration for %s: %d%s (%s)", symbol,
+                             sig.selected_duration,
+                             sig.selected_duration_unit,
+                             duration_choice["note"])
             self._log_signal(sig)
 
-            # 4. Never re-enter on the same completed candle.
+            # 5. Never re-enter on the same completed candle.
             if sig.actionable and sig.candle_epoch is not None:
                 if self._last_signal_epoch.get(symbol) == sig.candle_epoch:
                     log.info("%s: already acted on candle %s — skipping",
@@ -202,8 +233,11 @@ class TradingBot:
                     continue
             signals.append(sig)
 
-        # 5. Fill available slots with the strongest supported signals.
-        ranked = self.strategy.rank(signals)
+        # 6. Fill available slots with the strongest supported signals.
+        ranked = (
+            self.ai_brain.rank(signals) if self.cfg.ai_brain_enabled
+            else self.strategy.rank(signals)
+        )
         if not ranked:
             log.info("No actionable signals this scan")
             return
@@ -222,8 +256,13 @@ class TradingBot:
                          candidate.symbol, candidate.direction,
                          ", ".join(sorted(offered)))
                 continue
-            log.info("Selected signal: %s (score %d)",
-                     candidate.summary(), candidate.score)
+            if candidate.ai_score is not None:
+                log.info("Brain selected: %s (strategy %d, brain %.1f; %s)",
+                         candidate.summary(), candidate.score,
+                         candidate.ai_score, candidate.ai_note)
+            else:
+                log.info("Selected signal: %s (score %d)",
+                         candidate.summary(), candidate.score)
             result = self.executor.execute(
                 candidate, candidate.symbol, same_scan_batch=(opened > 0)
             )
@@ -308,6 +347,10 @@ class TradingBot:
             self.client.close()
         except Exception:
             pass
+        try:
+            self.ai_brain.close()
+        except Exception as exc:
+            log.warning("Could not finish AI research before shutdown: %s", exc)
         try:
             self.storage.export_csv()
         except Exception:

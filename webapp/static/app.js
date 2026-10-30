@@ -212,6 +212,33 @@ function renderStatus(snap) {
   $('scan-count').textContent = snap.scans
     ? `${snap.scans} scan${snap.scans === 1 ? '' : 's'} · ${snap.signals_seen} signal(s)`
     : '—';
+
+  const brain = snap.brain || {};
+  $('brain-badge').textContent = brain.enabled ? 'ENABLED' : 'DISABLED';
+  $('brain-badge').className = 'badge ' + (brain.enabled ? 'running' : '');
+  const selected = brain.selected_policy
+    ? `Current strategy: ${brain.selected_policy} · ${brain.phase || 'studying'}. `
+    : '';
+  $('brain-status').textContent = selected + (brain.status || 'Waiting for bot status.');
+  const ranked = brain.ranked || [];
+  const rankingText = ranked.length
+    ? 'Current ranking: ' + ranked.map((item, i) =>
+        `${i + 1}. ${item.symbol} ${item.direction} · strategy ${item.strategy_score}, brain ${item.ai_score}, expiry ${item.duration}${item.duration_unit} (${item.duration_source})`
+      ).join('  |  ')
+    : 'No approved signals ranked yet.';
+  const profileStats = brain.policy_stats || {};
+  const studyText = Object.entries(profileStats).map(([name, row]) => {
+    const rate = row.win_rate == null ? 'not measured' : `${row.win_rate}% wins`;
+    return `${name}: ${row.trades} trades, ${rate}, P/L ${row.net_profit}`;
+  }).join('  |  ');
+  const durationStudies = ranked.flatMap((item) => (item.duration_study || []).map((row) =>
+    `${item.symbol} ${row.duration_minutes}m: ${row.validation_win_rate}% over ${row.validation_trades} validation trades, P/L ${row.validation_net_profit}`
+  )).join('  |  ');
+  const detailText = [studyText && `Strategy profiles: ${studyText}`,
+    durationStudies && `Duration tests: ${durationStudies}`].filter(Boolean).join('  ·  ');
+  $('brain-ranked').textContent = detailText
+    ? `${rankingText}  ·  ${detailText}`
+    : rankingText;
 }
 
 /* ------------------------------------------------------------ render: risk */
@@ -357,7 +384,7 @@ function renderScanner(snap) {
   const body = $('scanner-body');
   const rows = snap.scanner || [];
   if (!rows.length) {
-    body.innerHTML = '<tr><td colspan="12" class="empty">Waiting for the first scan…</td></tr>';
+    body.innerHTML = '<tr><td colspan="14" class="empty">Waiting for the first scan…</td></tr>';
     return;
   }
 
@@ -377,6 +404,8 @@ function renderScanner(snap) {
       <td class="num">${fmtPrice(r.support)}</td>
       <td class="num">${fmtPrice(r.resistance)}</td>
       <td class="num"><div class="score-cell">${score}<span class="score-mini"><i class="${scoreCls}" style="width:${Math.min(100, score)}%"></i></span></div></td>
+      <td class="num" title="${esc(r.ai_note || r.strategy_variant || 'Not ranked by AI')}">${r.ai_score == null ? '—' : Number(r.ai_score).toFixed(1)}</td>
+      <td class="num" title="${esc(r.duration_note || '')}">${r.duration == null ? '—' : `${esc(r.duration)}${esc(r.duration_unit || 'm')}`}</td>
       <td class="${dirCls}">${esc(dir)}</td>
       <td class="dim">${esc(r.trend_1m || '—')} / ${esc(r.trend_1h || '—')}</td>
       <td><span class="status-pill ${statusClass(r)}" title="${esc(reasons)}">${esc(r.status || '—')}</span></td>
@@ -395,7 +424,7 @@ function renderTrades(snap) {
 
   // Prefer the /api/trades call; fall back to scanning snapshot.
   if (!trades.length) {
-    body.innerHTML = '<tr><td colspan="8" class="empty">No trades yet.</td></tr>';
+    body.innerHTML = '<tr><td colspan="10" class="empty">No trades yet.</td></tr>';
     return;
   }
 
@@ -407,10 +436,12 @@ function renderTrades(snap) {
     const pnlTxt = profit === null ? '—' : fmtMoney(profit);
     const status = (t.status || '—');
     const stCls = status === 'won' ? 'pos' : status === 'lost' ? 'neg' : status === 'unresolved' ? 'warn' : '';
-    return `<tr>
+    return `<tr title="${esc(t.signal_reasons || '')}">
       <td class="dim">${esc(fmtDateTime(t.opened_at))}</td>
       <td class="sym">${esc(t.symbol || '—')}</td>
       <td class="${dirCls}">${esc(dir)}</td>
+      <td class="dim">${esc(t.strategy_id || 'strategy')} / ${esc(t.strategy_variant || 'baseline')}</td>
+      <td>${esc(t.duration || '—')}${esc(t.duration_unit || '')}</td>
       <td class="num">${fmt(t.stake, 2)}</td>
       <td class="num">${fmt(t.payout, 2)}</td>
       <td class="num ${pnlCls}">${pnlTxt}</td>

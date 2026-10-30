@@ -84,6 +84,12 @@ class Signal:
     candle_epoch: Optional[int] = None
     trend_1m: str = "sideways"
     trend_1h: str = "sideways"
+    ai_score: Optional[float] = None
+    ai_note: str = ""
+    strategy_variant: str = "baseline"
+    strategy_id: str = "trend_confluence_v1"
+    selected_duration: Optional[int] = None
+    selected_duration_unit: str = "m"
 
     @property
     def actionable(self) -> bool:
@@ -99,6 +105,8 @@ class Signal:
 
 
 class Strategy:
+    strategy_id = "trend_confluence_v1"
+
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
 

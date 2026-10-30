@@ -3,9 +3,11 @@ bot_service.py — the supervisor that runs the engine in a background thread.
 
 Architecture
 ------------
-``WebBot`` subclasses :class:`bot.TradingBot`. It does not change what the bot
-does; it changes only what the bot *reports*. Every decision is still made by
-the unmodified Strategy, RiskManager, TradeExecutor and TradeMonitor.
+``WebBot`` subclasses :class:`bot.TradingBot`. It publishes engine state for
+the dashboard and applies the same bounded adaptive brain as the CLI bot: the
+brain selects a predefined strategy profile, researches expiry per market,
+and ranks signals already approved by Strategy. RiskManager, TradeExecutor
+and TradeMonitor remain the only paths for risk and execution.
 
 The subclass adds three things:
 
@@ -20,7 +22,8 @@ The subclass adds three things:
 
 What this class deliberately does NOT add
 -----------------------------------------
-* No method that buys, sells or sizes a trade.
+* No method that buys, sells or sizes a trade. The brain may select only a
+  historically studied 1, 2, 3 or 5 minute expiry for the current market.
 * No way to relax a risk check, raise a stake, or skip the demo guard.
 * No way to bypass ``RiskManager.can_trade`` — the executor calls it itself.
 
@@ -112,6 +115,14 @@ class WebBot(TradingBot):
     def __init__(self, cfg: Config, pause_event: threading.Event) -> None:
         super().__init__(cfg)
         self._pause_event = pause_event
+        STATE.set_brain({
+            "enabled": cfg.ai_brain_enabled,
+            "status": ("Enabled — waiting for the first scan." if cfg.ai_brain_enabled
+                       else "Disabled — using strategy score only."),
+            "ranked": [],
+            "policy_stats": {},
+            "selected_policy": None,
+        })
 
     # -- startup: mirrors bot.py's sequence, but records the failure reason --
     def startup(self) -> bool:
@@ -196,7 +207,7 @@ class WebBot(TradingBot):
         finally:
             self.shutdown()
 
-    # -- one scan: the same steps as bot.py, plus publication -------------
+    # -- one scan: shared strategy, bounded brain ranking and publication -
     def scan_once(self) -> None:
         self._monitor_open_contracts()
         available_slots = max(
@@ -212,10 +223,33 @@ class WebBot(TradingBot):
         if not decision.allowed:
             log.info("Paused — %s", decision.reason)
             self._publish_scanner_skipped(decision.reason)
+            research = self.ai_brain.research_state(
+                getattr(self.strategy, "strategy_id", "trend_confluence_v1")
+            )
+            STATE.set_brain({
+                "enabled": self.cfg.ai_brain_enabled,
+                "status": (f"Waiting — risk manager blocks entries: {decision.reason}"
+                           if self.cfg.ai_brain_enabled else
+                           "Disabled — using strategy score only."),
+                "ranked": [],
+                **research,
+                "selected_policy": None,
+            })
             return
+
+        if self.cfg.ai_brain_enabled:
+            policy, scan_strategy, study = self.ai_brain.select_strategy(
+                type(self.strategy)
+            )
+        else:
+            policy, scan_strategy = "baseline", self.strategy
+            study = {"enabled": False,
+                     "status": "Disabled — using strategy score only.",
+                     "policy_stats": {}}
 
         signals: List[Signal] = []
         rows: List[Dict[str, Any]] = []
+        duration_choices: Dict[str, Dict[str, object]] = {}
 
         for idx, symbol in self.market.next_scan_batch().items():
             try:
@@ -235,7 +269,17 @@ class WebBot(TradingBot):
                     idx, symbol, "warming up — not enough completed candles"))
                 continue
 
-            sig = self.strategy.evaluate(symbol, series, index_value=idx)
+            sig = scan_strategy.evaluate(symbol, series, index_value=idx)
+            sig.strategy_variant = policy
+            sig.strategy_id = getattr(scan_strategy, "strategy_id",
+                                      "trend_confluence_v1")
+            if self.cfg.ai_brain_enabled:
+                choice = self.ai_brain.select_duration(
+                    symbol, series, scan_strategy, policy
+                )
+                sig.selected_duration = int(choice["duration"])
+                sig.selected_duration_unit = str(choice["duration_unit"])
+                duration_choices[symbol] = choice
             self._log_signal(sig)
 
             repeat = False
@@ -246,12 +290,51 @@ class WebBot(TradingBot):
                     repeat = True
             if not repeat:
                 signals.append(sig)
-            rows.append(self._row(idx, symbol, sig, repeat))
+            row = self._row(idx, symbol, sig, repeat)
+            row["duration_note"] = duration_choices.get(symbol, {}).get("note", "")
+            rows.append(row)
 
+        ranked = (self.ai_brain.rank(signals) if self.cfg.ai_brain_enabled
+                  else self.strategy.rank(signals))
+        ranked_symbols = {sig.symbol: sig for sig in ranked}
+        for row in rows:
+            sig = ranked_symbols.get(row["symbol"])
+            if sig:
+                row["ai_score"] = sig.ai_score
+                row["ai_note"] = sig.ai_note
+                row["duration"] = sig.selected_duration or self.cfg.duration
+                row["duration_unit"] = (
+                    sig.selected_duration_unit
+                    if sig.selected_duration is not None
+                    else self.cfg.duration_unit
+                )
+                row["duration_note"] = duration_choices.get(
+                    sig.symbol, {}).get("note", "")
         STATE.merge_scanner(rows)
         STATE.set_risk(self.risk.status())
-
-        ranked = self.strategy.rank(signals)
+        study["status"] = (
+            f"{study['status']} Top approved signals ranked."
+            if ranked and self.cfg.ai_brain_enabled else
+            "Scanning — no strategy-approved signals to rank."
+            if self.cfg.ai_brain_enabled else
+            "Disabled — using strategy score only."
+        )
+        study["ranked"] = [
+            {"symbol": sig.symbol, "direction": sig.direction,
+             "strategy_score": sig.score, "ai_score": sig.ai_score,
+             "note": sig.ai_note, "policy": sig.strategy_variant,
+             "duration": sig.selected_duration or self.cfg.duration,
+             "duration_unit": (sig.selected_duration_unit
+                               if sig.selected_duration is not None
+                               else self.cfg.duration_unit),
+             "duration_source": duration_choices.get(
+                 sig.symbol, {}).get("source", "configured fallback"),
+             "duration_study": duration_choices.get(
+                 sig.symbol, {}).get("study", [])}
+            for sig in ranked[:3]
+        ]
+        study["enabled"] = self.cfg.ai_brain_enabled
+        STATE.set_brain(study)
         if not ranked:
             log.info("No actionable signals this scan")
             return
@@ -270,8 +353,13 @@ class WebBot(TradingBot):
                          candidate.symbol, candidate.direction,
                          ", ".join(sorted(offered)))
                 continue
-            log.info("Selected signal: %s (score %d)",
-                     candidate.summary(), candidate.score)
+            if candidate.ai_score is not None:
+                log.info("Brain selected: %s (strategy %d, brain %.1f; %s)",
+                         candidate.summary(), candidate.score,
+                         candidate.ai_score, candidate.ai_note)
+            else:
+                log.info("Selected signal: %s (score %d)",
+                         candidate.summary(), candidate.score)
             result = self.executor.execute(
                 candidate, candidate.symbol, same_scan_batch=(opened > 0)
             )
@@ -389,6 +477,12 @@ class WebBot(TradingBot):
             "support": sig.support,
             "resistance": sig.resistance,
             "score": sig.score,
+            "ai_score": sig.ai_score,
+            "ai_note": sig.ai_note,
+            "strategy_variant": sig.strategy_variant,
+            "strategy_id": sig.strategy_id,
+            "duration": sig.selected_duration,
+            "duration_unit": sig.selected_duration_unit,
             "direction": sig.direction,
             "trend_1m": sig.trend_1m,
             "trend_1h": sig.trend_1h,

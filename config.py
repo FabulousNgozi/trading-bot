@@ -188,6 +188,7 @@ class Config:
     require_htf_confirmation: bool = True
     require_candle_confirmation: bool = True
     scan_interval_seconds: int = 15
+    ai_brain_enabled: bool = True
 
     # --- storage -----------------------------------------------------------
     db_path: str = "data/bot.db"
@@ -222,6 +223,7 @@ class Config:
             "trading_day_timezone": self.trading_day_timezone,
             "market_scan": "all active synthetic indices",
             "min_signal_score": self.min_signal_score,
+            "ai_brain_enabled": self.ai_brain_enabled,
             "scan_interval_seconds": self.scan_interval_seconds,
             "db_path": self.db_path,
             "csv_path": self.csv_path,
@@ -359,6 +361,7 @@ def load_config(env_file: Optional[str] = None, require_credentials: bool = True
         require_htf_confirmation=_env_bool("REQUIRE_HTF_CONFIRMATION", True),
         require_candle_confirmation=_env_bool("REQUIRE_CANDLE_CONFIRMATION", True),
         scan_interval_seconds=_env_int("SCAN_INTERVAL_SECONDS", 15, 1, 3600),
+        ai_brain_enabled=_env_bool("AI_BRAIN_ENABLED", True),
         db_path=_env("DB_PATH", "data/bot.db") or "data/bot.db",
         csv_path=_env("CSV_PATH", "data/trades.csv") or "data/trades.csv",
         log_level=(_env("LOG_LEVEL", "INFO") or "INFO").upper(),

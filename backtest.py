@@ -14,7 +14,7 @@ Execution model (and its assumptions)
 * The entry is filled at the **next bar's open**, not the signal bar's close.
   Filling at the signal bar's close is the classic look-ahead bug and inflates
   results substantially.
-* A 1-minute Rise/Fall contract wins if the exit price is above (CALL) or
+* A Rise/Fall contract wins if the exit price is above (CALL) or
   below (PUT) the entry price at expiry. Ties are a loss (the broker keeps
   the stake) — this is the conservative assumption.
 * Payout is modelled as a fixed multiple of stake (default 1.95x, i.e. a
@@ -65,6 +65,7 @@ class BacktestTrade:
     profit: float
     score: int
     reasons: str
+    duration_minutes: int = 1
 
 
 @dataclass
@@ -77,6 +78,7 @@ class BacktestResult:
     payout_multiple: float = 1.95
     stake: float = 1.0
     initial_balance: float = 0.0
+    duration_minutes: int = 1
 
     # ---- derived metrics ------------------------------------------------
     @property
@@ -139,6 +141,7 @@ class BacktestResult:
     def summary(self) -> dict:
         return {
             "symbol": self.symbol,
+            "duration_minutes": self.duration_minutes,
             "period": {
                 "start": datetime.fromtimestamp(self.start_epoch, timezone.utc)
                 .strftime("%Y-%m-%d %H:%M"),
@@ -168,16 +171,20 @@ class BacktestResult:
 
 
 class Backtester:
-    def __init__(self, cfg: Config, payout_multiple: float = 1.95) -> None:
+    def __init__(self, cfg: Config, payout_multiple: float = 1.95,
+                 strategy: Optional[Strategy] = None) -> None:
         self.cfg = cfg
-        self.strategy = Strategy(cfg)
+        self.strategy = strategy or Strategy(cfg)
         self.payout_multiple = payout_multiple
 
     # ------------------------------------------------------------------
     def run(self, symbol: str, candles_1m: Sequence[Candle],
             candles_5m: Optional[Sequence[Candle]] = None,
             candles_1h: Optional[Sequence[Candle]] = None,
-            initial_balance: float = 1000.0) -> BacktestResult:
+            initial_balance: float = 1000.0,
+            duration_minutes: int = 1,
+            start_index: Optional[int] = None,
+            end_index: Optional[int] = None) -> BacktestResult:
         """
         Replay a candle history.
 
@@ -185,6 +192,8 @@ class Backtester:
         series, so a single 1m download is enough to exercise the full
         multi-timeframe logic.
         """
+        if duration_minutes not in (1, 2, 3, 5):
+            raise ValueError("duration_minutes must be one of 1, 2, 3, or 5")
         c1m = list(candles_1m)
         if len(c1m) < self.cfg.ema_slow + 10:
             raise ValueError(
@@ -203,13 +212,21 @@ class Backtester:
             payout_multiple=self.payout_multiple,
             stake=self.cfg.stake,
             initial_balance=initial_balance,
+            duration_minutes=duration_minutes,
         )
 
         warmup = max(self.cfg.ema_slow, self.cfg.sr_lookback) + 5
+        first_index = max(warmup, start_index if start_index is not None else warmup)
+        stop_index = min(len(c1m) - duration_minutes,
+                         end_index if end_index is not None else len(c1m))
         last_signal_epoch: Optional[int] = None
+        busy_until_index = first_index
+        cooldown_bars = (self.cfg.cooldown_seconds + 59) // 60
 
         # Walk forward. At index i we may only use data up to and including i.
-        for i in range(warmup, len(c1m) - 1):
+        for i in range(first_index, stop_index):
+            if i < busy_until_index:
+                continue
             window_1m = c1m[: i + 1]
             now = c1m[i].epoch + 60  # the bar at i has just closed
 
@@ -230,14 +247,14 @@ class Backtester:
             if sig.candle_epoch is not None and sig.candle_epoch == last_signal_epoch:
                 continue
 
-            # Entry at the NEXT bar's open — no look-ahead.
+            # Enter at the next bar's open and expire after the selected bars.
             entry_bar = c1m[i + 1]
             entry_price = entry_bar.open
             entry_epoch = entry_bar.epoch
 
-            # 1-minute expiry: exit at the close of the entry bar.
-            exit_price = entry_bar.close
-            exit_epoch = entry_bar.epoch + 60
+            exit_bar = c1m[i + duration_minutes]
+            exit_price = exit_bar.close
+            exit_epoch = exit_bar.epoch + 60
 
             if sig.direction == "CALL":
                 won = exit_price > entry_price
@@ -261,10 +278,85 @@ class Backtester:
                 profit=profit,
                 score=sig.score,
                 reasons=" | ".join(sig.reasons),
+                duration_minutes=duration_minutes,
             ))
             last_signal_epoch = sig.candle_epoch
+            busy_until_index = i + max(duration_minutes, cooldown_bars)
 
         return result
+
+    def run_duration_study(self, symbol: str,
+                           candles_1m: Sequence[Candle],
+                           candles_5m: Optional[Sequence[Candle]] = None,
+                           candles_1h: Optional[Sequence[Candle]] = None
+                           ) -> Dict[int, Dict[str, object]]:
+        """Compare duration choices on chronological training and validation sets."""
+        c1m = list(candles_1m)
+        c5m = list(candles_5m) if candles_5m else aggregate(c1m, 300)
+        c1h = list(candles_1h) if candles_1h else aggregate(c1m, 3600)
+        warmup = max(self.cfg.ema_slow, self.cfg.sr_lookback) + 5
+        split = warmup + int(max(0, len(c1m) - warmup) * 0.65)
+        # Evaluate the strategy once per historical candle, then replay those
+        # same causal signals at each candidate expiry.
+        entries = []
+        for i in range(warmup, len(c1m) - 1):
+            now = c1m[i].epoch + 60
+            w5 = [c for c in c5m if c.epoch + 300 <= now]
+            w1h = [c for c in c1h if c.epoch + 3600 <= now]
+            if len(w5) < 10 or len(w1h) < 10:
+                continue
+            series = {
+                "1m": CandleSeries(symbol, 60, c1m[:i + 1]),
+                "5m": CandleSeries(symbol, 300, w5),
+                "1h": CandleSeries(symbol, 3600, w1h),
+            }
+            sig = self.strategy.evaluate(symbol, series, now=now)
+            if sig.actionable:
+                entries.append((i, sig.direction))
+
+        def simulate(duration: int, start: int, end: int) -> Dict[str, object]:
+            wins = trades = 0
+            net = equity = peak = drawdown = 0.0
+            busy_until = start
+            for i, direction in entries:
+                if i < start or i >= end or i < busy_until:
+                    continue
+                if i + duration >= len(c1m) or i + duration >= end:
+                    continue
+                entry = c1m[i + 1].open
+                exit_price = c1m[i + duration].close
+                won = (exit_price > entry if direction == "CALL"
+                       else exit_price < entry)
+                profit = (round(self.cfg.stake * (self.payout_multiple - 1), 2)
+                          if won else -self.cfg.stake)
+                trades += 1
+                wins += int(won)
+                net += profit
+                equity += profit
+                peak = max(peak, equity)
+                drawdown = max(drawdown, peak - equity)
+                cooldown_bars = (self.cfg.cooldown_seconds + 59) // 60
+                busy_until = i + max(duration, cooldown_bars)
+            return {"trades": trades, "wins": wins,
+                    "win_rate": wins / trades * 100 if trades else 0.0,
+                    "net_profit": round(net, 2),
+                    "drawdown": round(drawdown, 2)}
+
+        out: Dict[int, Dict[str, object]] = {}
+        for duration in (1, 2, 3, 5):
+            train = simulate(duration, warmup, split)
+            validation = simulate(duration, split, len(c1m))
+            out[duration] = {
+                "train_trades": train["trades"],
+                "train_wins": train["wins"],
+                "train_net_profit": train["net_profit"],
+                "validation_trades": validation["trades"],
+                "validation_wins": validation["wins"],
+                "validation_win_rate": round(validation["win_rate"], 2),
+                "validation_net_profit": validation["net_profit"],
+                "validation_drawdown": validation["drawdown"],
+            }
+        return out
 
     # ------------------------------------------------------------------
     def run_multi(self, data: Dict[str, Sequence[Candle]],
@@ -285,14 +377,14 @@ class Backtester:
         with open(path, "w", newline="", encoding="utf-8") as fh:
             w = csv.writer(fh)
             w.writerow([
-                "symbol", "direction", "entry_time_utc", "entry_price",
+                "symbol", "duration_minutes", "direction", "entry_time_utc", "entry_price",
                 "exit_time_utc", "exit_price", "stake", "payout", "won",
                 "profit", "score", "reasons",
             ])
             for r in results:
                 for t in r.trades:
                     w.writerow([
-                        t.symbol, t.direction,
+                        t.symbol, t.duration_minutes, t.direction,
                         datetime.fromtimestamp(t.entry_epoch, timezone.utc)
                         .strftime("%Y-%m-%d %H:%M:%S"),
                         t.entry_price,
@@ -335,7 +427,7 @@ def format_report(results: Sequence[BacktestResult]) -> str:
     lines.append("")
     lines.append("ASSUMPTIONS (read before interpreting any number below):")
     lines.append("  * Entry at the NEXT bar's open (no look-ahead).")
-    lines.append("  * 1-minute expiry; tie counts as a LOSS.")
+    lines.append("  * Expiry follows each result row; ties count as a LOSS.")
     lines.append("  * Payout modelled as a constant multiple of stake.")
     lines.append("  * Slippage not modelled. Synthetic indices have no book.")
     lines.append("  * Results are historical simulation, NOT a forecast.")
@@ -345,7 +437,7 @@ def format_report(results: Sequence[BacktestResult]) -> str:
         s = r.summary()
         lines.append("-" * 78)
         lines.append(f"{s['symbol']}   {s['period']['start']} -> "
-                     f"{s['period']['end']}  (1m bars)")
+                     f"{s['period']['end']}  ({s['duration_minutes']}m expiry, 1m bars)")
         lines.append("-" * 78)
         lines.append(f"  Sample size      : {s['sample_size']} trades")
         lines.append(f"  Wins / Losses    : {s['wins']} / {s['losses']}")

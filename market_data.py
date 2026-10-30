@@ -217,13 +217,14 @@ class MarketData:
         """
         Fetch the three timeframes the strategy needs.
 
-        Counts are chosen so the slowest indicator (EMA200 on 1h) has enough
-        warm-up: 260 hourly bars, 300 five-minute, 300 one-minute.
+        Counts provide native history for EMA200 and enough 1m bars for the
+        duration backtester to compare its chronological training/validation
+        windows. The API caps each request at 1000 candles.
         """
         return {
             "1h": self.fetch(symbol, self.GRAN_1H, count=260),
             "5m": self.fetch(symbol, self.GRAN_5M, count=300),
-            "1m": self.fetch(symbol, self.GRAN_1M, count=300),
+            "1m": self.fetch(symbol, self.GRAN_1M, count=1000),
         }
 
     def warmup_ok(self, series: Dict[str, CandleSeries],

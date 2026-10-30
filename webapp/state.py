@@ -58,6 +58,13 @@ class BotState:
 
         # Engine risk snapshot (from RiskManager.status()).
         self.risk: Dict[str, Any] = {}
+        self.brain: Dict[str, Any] = {
+            "enabled": True,
+            "status": "Ready — waiting for the bot to start.",
+            "ranked": [],
+            "policy_stats": {},
+            "selected_policy": None,
+        }
 
         # One row per configured market, refreshed every scan.
         self.scanner: List[Dict[str, Any]] = []
@@ -131,6 +138,11 @@ class BotState:
     def set_risk(self, risk: Dict[str, Any]) -> None:
         with self._lock:
             self.risk = dict(risk or {})
+            self._version += 1
+
+    def set_brain(self, brain: Dict[str, Any]) -> None:
+        with self._lock:
+            self.brain = dict(brain or {})
             self._version += 1
 
     def set_scanner(self, rows: List[Dict[str, Any]]) -> None:
@@ -215,6 +227,7 @@ class BotState:
                 "demo_only": True,
                 "account": dict(self.account) if self.account else None,
                 "risk": dict(self.risk),
+                "brain": dict(self.brain),
                 "scanner": [dict(r) for r in self.scanner],
                 "last_scan_at": self.last_scan_at,
                 "open_contract": dict(self.open_contract)

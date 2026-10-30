@@ -6,7 +6,7 @@ sequence and refuses to buy unless every check passes:
 
     1. risk manager says yes
     2. contract type is actually offered for this symbol
-    3. a proposal is obtained for the configured stake/duration/currency
+    3. a proposal is obtained for the configured stake and AI-selected duration
     4. the proposal is validated against the config
     5. only then: buy
 
@@ -71,7 +71,9 @@ class TradeExecutor:
 
     # ------------------------------------------------------------------
     def validate_proposal(self, prop: Dict[str, Any], symbol: str,
-                          contract_type: str) -> tuple:
+                          contract_type: str,
+                          duration: Optional[int] = None,
+                          duration_unit: Optional[str] = None) -> tuple:
         """
         Check a proposal against the configuration.
 
@@ -103,9 +105,9 @@ class TradeExecutor:
         # Duration check: date_expiry - date_start should match the config.
         ds, de = prop.get("date_start"), prop.get("date_expiry")
         if ds and de:
-            expected = self.cfg.duration * {
+            expected = (duration or self.cfg.duration) * {
                 "s": 1, "m": 60, "h": 3600, "d": 86400
-            }.get(self.cfg.duration_unit, 60)
+            }.get(duration_unit or self.cfg.duration_unit, 60)
             actual = int(de) - int(ds)
             # Allow a small tolerance for server-side rounding.
             if abs(actual - expected) > max(5, expected * 0.05):
@@ -128,6 +130,15 @@ class TradeExecutor:
         if not signal.actionable:
             return ExecutionResult(False, "signal is not actionable")
         contract_type = signal.direction
+        duration = signal.selected_duration or self.cfg.duration
+        duration_unit = (signal.selected_duration_unit
+                         if signal.selected_duration is not None
+                         else self.cfg.duration_unit)
+        if signal.selected_duration is not None and (
+                duration not in (1, 2, 3, 5) or duration_unit != "m"):
+            return ExecutionResult(
+                False, "AI-selected duration must be 1, 2, 3, or 5 minutes"
+            )
         if contract_type not in ("CALL", "PUT"):
             return ExecutionResult(False, f"unsupported signal direction: {contract_type}")
 
@@ -158,8 +169,8 @@ class TradeExecutor:
                 symbol=symbol,
                 contract_type=contract_type,
                 stake=self.cfg.stake,
-                duration=self.cfg.duration,
-                duration_unit=self.cfg.duration_unit,
+                duration=duration,
+                duration_unit=duration_unit,
             )
         except ProposalRejected as exc:
             log.warning("Proposal rejected for %s: %s", symbol, exc)
@@ -173,7 +184,7 @@ class TradeExecutor:
 
         # 4. Validate.
         ok, reason = self.validate_proposal(
-            prop, symbol, contract_type
+            prop, symbol, contract_type, duration, duration_unit
         )
         if not ok:
             log.warning("Proposal failed validation for %s: %s", symbol, reason)
@@ -186,7 +197,7 @@ class TradeExecutor:
         log.info(
             "Buying %s %s stake=%.2f payout=%.2f duration=%d%s",
             symbol, contract_type, ask, float(prop["payout"]),
-            self.cfg.duration, self.cfg.duration_unit,
+            duration, duration_unit,
         )
         try:
             receipt = self.client.buy_contract(proposal_id, ask)
@@ -207,14 +218,16 @@ class TradeExecutor:
             index_value=signal.index_value,
             direction=contract_type,
             stake=float(receipt.get("buy_price", ask)),
-            duration=self.cfg.duration,
-            duration_unit=self.cfg.duration_unit,
+            duration=duration,
+            duration_unit=duration_unit,
             status="pending",
             payout=float(receipt.get("payout", prop.get("payout", 0))),
             buy_price=float(receipt.get("buy_price", ask)),
             entry_spot=float(prop.get("spot")) if prop.get("spot") else None,
             signal_score=signal.score,
             signal_reasons=" | ".join(signal.reasons),
+            strategy_variant=signal.strategy_variant,
+            strategy_id=signal.strategy_id,
         )
         self.storage.insert_trade(rec)
         self.storage.append_csv(rec)
