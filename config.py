@@ -165,7 +165,7 @@ class Config:
     max_consecutive_losses: int = 3
     daily_loss_limit: float = 5.0
     daily_profit_target: float = 0.0
-    cooldown_seconds: int = 60
+    cooldown_seconds: int = 0
     # 0 disables only the daily entry-count cap.
     max_trades_per_day: int = 0
     loss_cooldown_minutes: int = 60
@@ -345,7 +345,7 @@ def load_config(env_file: Optional[str] = None, require_credentials: bool = True
         max_consecutive_losses=_env_int("MAX_CONSECUTIVE_LOSSES", 3, 1, 50),
         daily_loss_limit=_env_float("DAILY_LOSS_LIMIT", 5.0, 0.01, 100000),
         daily_profit_target=_env_float("DAILY_PROFIT_TARGET", 0.0, 0, 100000),
-        cooldown_seconds=_env_int("COOLDOWN_SECONDS", 60, 0, 86400),
+        cooldown_seconds=_env_int("COOLDOWN_SECONDS", 0, 0, 86400),
         max_trades_per_day=_env_int("MAX_TRADES_PER_DAY", 0, 0, 1000),
         loss_cooldown_minutes=_env_int("LOSS_COOLDOWN_MINUTES", 60, 0, 10080),
         trading_day_timezone=tz,

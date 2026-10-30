@@ -205,7 +205,7 @@ list). The important ones:
 | `MAX_CONSECUTIVE_LOSSES` | `3` | Stop after this many losses in a row |
 | `DAILY_LOSS_LIMIT` | `5.0` | Daily stop-loss: pause after this realised loss |
 | `DAILY_PROFIT_TARGET` | `0` | Daily take-profit: pause after this realised profit (`0` disables it) |
-| `COOLDOWN_SECONDS` | `60` | Minimum gap between entries |
+| `COOLDOWN_SECONDS` | `0` | Minimum gap between entries; `0` disables the delay |
 | `MAX_TRADES_PER_DAY` | `0` | Daily entry cap; `0` disables the cap |
 | `LOSS_COOLDOWN_MINUTES` | `60` | Pause after the loss-streak limit (`0` = manual reset only) |
 | `TRADING_DAY_TIMEZONE` | `UTC` | Where the trading day rolls over |

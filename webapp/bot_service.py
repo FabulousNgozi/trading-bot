@@ -363,9 +363,10 @@ class WebBot(TradingBot):
                 log.info("Skipping %s: could not confirm offered contract types",
                          candidate.symbol)
                 continue
-            if candidate.direction not in offered:
+            order_type = candidate.contract_type or candidate.direction
+            if order_type not in offered:
                 log.info("Skipping %s: %s is not offered (available: %s)",
-                         candidate.symbol, candidate.direction,
+                         candidate.symbol, order_type,
                          ", ".join(sorted(offered)))
                 continue
             if candidate.ai_score is not None:
