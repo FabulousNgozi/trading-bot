@@ -103,6 +103,8 @@ class RiskManager:
         return RiskDecision(True)
 
     def check_daily_trade_count(self) -> RiskDecision:
+        if self.cfg.max_trades_per_day <= 0:
+            return RiskDecision(True)
         state = self.storage.get_daily_state()
         if state["trades_count"] >= self.cfg.max_trades_per_day:
             return RiskDecision(
@@ -261,8 +263,9 @@ class RiskManager:
             "trading_day": state["trading_day"],
             "realised_pnl": round(state["realised_pnl"], 2),
             "trades_today": state["trades_count"],
-            "trades_remaining": max(
-                0, self.cfg.max_trades_per_day - state["trades_count"]
+            "trades_remaining": (
+                max(0, self.cfg.max_trades_per_day - state["trades_count"])
+                if self.cfg.max_trades_per_day > 0 else None
             ),
             "consecutive_losses": self.storage.get_consecutive_losses(),
             "max_consecutive_losses": self.cfg.max_consecutive_losses,

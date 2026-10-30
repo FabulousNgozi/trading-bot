@@ -206,7 +206,7 @@ list). The important ones:
 | `DAILY_LOSS_LIMIT` | `5.0` | Daily stop-loss: pause after this realised loss |
 | `DAILY_PROFIT_TARGET` | `0` | Daily take-profit: pause after this realised profit (`0` disables it) |
 | `COOLDOWN_SECONDS` | `60` | Minimum gap between entries |
-| `MAX_TRADES_PER_DAY` | `20` | Daily entry cap |
+| `MAX_TRADES_PER_DAY` | `0` | Daily entry cap; `0` disables the cap |
 | `LOSS_COOLDOWN_MINUTES` | `60` | Pause after the loss-streak limit (`0` = manual reset only) |
 | `TRADING_DAY_TIMEZONE` | `UTC` | Where the trading day rolls over |
 | `MIN_SIGNAL_SCORE` | `60` | Minimum score to trade |
@@ -244,7 +244,7 @@ Deriv Volatility Bot — DEMO ONLY
 12:00:02  INFO  market_data   Resolved 5 market(s): V10=R_10, V25=R_25, V50=R_50, V75=R_75, V100=R_100
 12:00:02  INFO  bot           Available markets: V10, V25, V50, V75, V100
 12:00:02  INFO  bot           Stake: 1.00 USD | Duration: 1m | Max open: 3
-12:00:02  INFO  bot           Risk: daily loss 5.00 | daily profit target 0.00 | 3 consecutive losses | 20 trades/day | 60s cooldown
+12:00:02  INFO  bot           Risk: daily loss 5.00 | daily profit target 0.00 | 3 consecutive losses | unlimited daily entries | 60s cooldown
 12:00:02  INFO  bot           Trading day boundary: midnight UTC
 ```
 
@@ -372,7 +372,7 @@ A restart cannot reset a limit.
 | Consecutive-loss stop | 3 | `check_consecutive_losses` |
 | Pause after streak | 60 min | `check_pause` |
 | Cooldown between entries | 60 s | `check_cooldown` |
-| Daily trade cap | 20 | `check_daily_trade_count` |
+| Daily trade cap | 0 (disabled) | `check_daily_trade_count` |
 | Unresolved-contract block | always | `check_unresolved` |
 
 **No martingale. No stake escalation. No averaging down. No recovery trades.**

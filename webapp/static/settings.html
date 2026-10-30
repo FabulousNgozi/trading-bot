@@ -119,9 +119,9 @@
             <div class="hint">Pause new entries for the day when realized loss reaches this amount. Open contracts still settle.</div>
           </div>
           <div class="field">
-            <label for="f-trades">MAX_TRADES_PER_DAY</label>
-            <input type="number" id="f-trades" name="max_trades_per_day" step="1" min="1" max="1000">
-            <div class="hint">Hard cap on trades per trading day.</div>
+            <label for="f-trades">Daily trade cap</label>
+            <input type="number" id="f-trades" name="max_trades_per_day" step="1" min="0" max="1000">
+            <div class="hint">Set to 0 for no daily entry-count cap.</div>
           </div>
           <div class="field">
             <label for="f-streak">MAX_CONSECUTIVE_LOSSES</label>

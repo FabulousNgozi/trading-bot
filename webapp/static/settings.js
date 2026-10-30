@@ -64,7 +64,8 @@
         $('f-max-open').value = d.max_open_contracts || '3';
         $('f-take-profit').value = d.daily_profit_target || '0';
         $('f-loss').value = d.daily_loss_limit || '';
-        $('f-trades').value = d.max_trades_per_day || '';
+        $('f-trades').value = d.max_trades_per_day === 0 || d.max_trades_per_day === '0'
+          ? '0' : (d.max_trades_per_day || '');
         $('f-streak').value = d.max_consecutive_losses || '';
 
         var conn = $('conn-label');

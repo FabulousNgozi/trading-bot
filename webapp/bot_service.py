@@ -177,12 +177,14 @@ class WebBot(TradingBot):
         log.info("Stake: %.2f %s | Duration: %d%s | Max open: %d",
                  self.cfg.stake, self.cfg.currency, self.cfg.duration,
                  self.cfg.duration_unit, self.cfg.max_open_contracts)
+        trade_cap = (f"{self.cfg.max_trades_per_day} trades/day"
+                     if self.cfg.max_trades_per_day > 0
+                     else "unlimited daily entries")
         log.info("Risk: daily loss %.2f | daily profit target %.2f | "
-                 "%d consecutive losses | "
-                 "%d trades/day | %ds cooldown",
+                 "%d consecutive losses | %s | %ds cooldown",
                  self.cfg.daily_loss_limit, self.cfg.daily_profit_target,
-                 self.cfg.max_consecutive_losses,
-                 self.cfg.max_trades_per_day, self.cfg.cooldown_seconds)
+                 self.cfg.max_consecutive_losses, trade_cap,
+                 self.cfg.cooldown_seconds)
         return True
 
     # -- the loop, with a pause gate between iterations -------------------

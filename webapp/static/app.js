@@ -320,7 +320,7 @@ function renderRisk(snap) {
   tBar.className = 'bar-fill ' + barClass(tPct, true);
   $('m-trades-sub').textContent = maxT
     ? `${Math.max(0, maxT - used)} remaining today`
-    : '—';
+    : 'unlimited daily entries';
 
   // Footer
   $('m-cooldown').textContent = r.can_trade ? 'clear' : (r.blocked_by === 'cooldown' ? 'active' : '—');

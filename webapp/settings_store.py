@@ -169,8 +169,8 @@ def validate_optional(fields: Dict[str, Any]) -> Tuple[bool, str, Dict[str, str]
             n = int(fields["max_trades_per_day"])
         except (TypeError, ValueError):
             return False, "Max trades per day must be a whole number.", {}
-        if not (1 <= n <= 1000):
-            return False, "Max trades per day must be between 1 and 1000.", {}
+        if not (0 <= n <= 1000):
+            return False, "Max trades per day must be between 0 and 1000 (0 = unlimited).", {}
         cleaned["MAX_TRADES_PER_DAY"] = str(n)
 
     if "max_consecutive_losses" in fields and fields["max_consecutive_losses"] not in (None, ""):
@@ -285,7 +285,7 @@ def current_state() -> Dict[str, Any]:
         "daily_loss_limit": _num("DAILY_LOSS_LIMIT", "5.0"),
         "daily_profit_target": _num("DAILY_PROFIT_TARGET", "0"),
         "max_open_contracts": _num("MAX_OPEN_CONTRACTS", "3"),
-        "max_trades_per_day": _num("MAX_TRADES_PER_DAY", "20"),
+        "max_trades_per_day": _num("MAX_TRADES_PER_DAY", "0"),
         "max_consecutive_losses": _num("MAX_CONSECUTIVE_LOSSES", "3"),
         "enabled_indices": _num("ENABLED_INDICES", "0,10,25,50,75,100,150,250"),
     }
