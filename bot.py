@@ -46,7 +46,7 @@ from logger_config import get_logger, setup_logging
 from market_data import MarketData
 from risk_manager import RiskManager
 from storage import Storage
-from strategy import Signal, Strategy
+from strategy import Signal, Strategy, strategy_for_market
 from trade_executor import TradeExecutor
 from trade_monitor import TradeMonitor
 
@@ -179,17 +179,7 @@ class TradingBot:
             log.info("Paused — %s", decision.reason)
             return
 
-        # 3. Select a bounded strategy profile from resolved demo outcomes.
-        if self.cfg.ai_brain_enabled:
-            policy, scan_strategy, study = self.ai_brain.select_strategy(
-                type(self.strategy)
-            )
-            log.info("AI study: %s | policy stats: %s",
-                     study["status"], study["policy_stats"])
-        else:
-            policy, scan_strategy = "baseline", self.strategy
-
-        # 4. Evaluate every market.
+        # 3. Route each market through its own strategy family.
         signals: List[Signal] = []
         for idx, symbol in self.market.next_scan_batch().items():
             try:
@@ -205,6 +195,15 @@ class TradingBot:
             if not self.market.warmup_ok(series):
                 log.debug("%s: not enough history yet", symbol)
                 continue
+
+            market_strategy = strategy_for_market(symbol, self.cfg)
+            if self.cfg.ai_brain_enabled:
+                policy, scan_strategy, study = self.ai_brain.select_strategy(
+                    type(market_strategy)
+                )
+                log.info("AI study for %s: %s", symbol, study["status"])
+            else:
+                policy, scan_strategy = "baseline", market_strategy
 
             sig = scan_strategy.evaluate(symbol, series, index_value=idx)
             sig.strategy_variant = policy
@@ -223,6 +222,9 @@ class TradingBot:
                              sig.selected_duration,
                              sig.selected_duration_unit,
                              duration_choice["note"])
+            elif sig.strategy_id == "boom_crash_spike_fade_v1":
+                sig.selected_duration = 300
+                sig.selected_duration_unit = "s"
             self._log_signal(sig)
 
             # 5. Never re-enter on the same completed candle.

@@ -223,7 +223,7 @@ function renderStatus(snap) {
   const ranked = brain.ranked || [];
   const rankingText = ranked.length
     ? 'Current ranking: ' + ranked.map((item, i) =>
-        `${i + 1}. ${item.symbol} ${item.direction} · strategy ${item.strategy_score}, brain ${item.ai_score}, expiry ${item.duration}${item.duration_unit} (${item.duration_source})`
+        `${i + 1}. ${item.symbol} ${item.contract_type || item.direction} · strategy ${item.strategy_score}, brain ${item.ai_score}, ${item.duration_source === 'multiplier auto-management' ? 'max hold' : 'expiry'} ${item.duration}${item.duration_unit} (${item.duration_source})`
       ).join('  |  ')
     : 'No approved signals ranked yet.';
   const profileStats = brain.policy_stats || {};
@@ -389,8 +389,9 @@ function renderScanner(snap) {
   }
 
   body.innerHTML = rows.map((r) => {
-    const dir = r.direction || 'NONE';
-    const dirCls = dir === 'CALL' ? 'dir-call' : dir === 'PUT' ? 'dir-put' : 'dir-none';
+    const dir = r.contract_type || r.direction || 'NONE';
+    const dirCls = ['CALL', 'MULTUP'].includes(dir) ? 'dir-call'
+      : ['PUT', 'MULTDOWN'].includes(dir) ? 'dir-put' : 'dir-none';
     const score = Number(r.score || 0);
     const scoreCls = score >= 80 ? 'hi' : score < 60 ? 'lo' : '';
     const reasons = (r.reasons || []).join('\n');
@@ -430,7 +431,7 @@ function renderTrades(snap) {
 
   body.innerHTML = trades.map((t) => {
     const dir = t.direction || '';
-    const dirCls = dir === 'CALL' ? 'dir-call' : 'dir-put';
+    const dirCls = ['CALL', 'MULTUP'].includes(dir) ? 'dir-call' : 'dir-put';
     const profit = t.profit === null || t.profit === undefined ? null : Number(t.profit);
     const pnlCls = profit === null ? '' : profit > 0 ? 'pos' : profit < 0 ? 'neg' : '';
     const pnlTxt = profit === null ? '—' : fmtMoney(profit);

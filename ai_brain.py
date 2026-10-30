@@ -103,6 +103,13 @@ class AIBrain:
                    "duration_unit": self.cfg.duration_unit,
                    "source": "configured fallback",
                    "note": "No reliable duration comparison yet."}
+        strategy_id = getattr(strategy, "strategy_id", "trend_confluence_v1")
+        if strategy_id == "boom_crash_spike_fade_v1":
+            return {
+                "duration": 300, "duration_unit": "s",
+                "source": "multiplier auto-management",
+                "note": "Positions close at +/-50% of stake or after 300 seconds.",
+            }
         if not self.cfg.ai_brain_enabled or self.cfg.duration_unit != "m":
             return default
 
@@ -117,7 +124,6 @@ class AIBrain:
         if len(candles_1m) < self.cfg.ema_slow + 100:
             return default
 
-        strategy_id = getattr(strategy, "strategy_id", "trend_confluence_v1")
         latest_epoch = candles_1m[-1].epoch
         cached = self.storage.get_duration_study(
             symbol, strategy_id, strategy_variant
@@ -364,6 +370,15 @@ class AIBrain:
         history = self.storage.resolved_trade_performance(
             actionable[0].strategy_id
         )
+        if actionable[0].strategy_id == "boom_crash_spike_fade_v1":
+            normalized = {}
+            for key, row in history.items():
+                symbol, direction = key.rsplit(":", 1)
+                direction = {"MULTUP": "CALL", "MULTDOWN": "PUT"}.get(
+                    direction, direction
+                )
+                normalized[f"{symbol}:{direction}"] = row
+            history = normalized
         total_trades = sum(row["trades"] for row in history.values())
         total_wins = sum(row["wins"] for row in history.values())
         baseline = (total_wins / total_trades) if total_trades else 0.5

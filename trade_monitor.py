@@ -12,11 +12,14 @@ Rules
 * The open-contract slot is released only on a confirmed final state.
 * P/L is taken from the API's ``profit`` field, not recomputed locally, so
   the bot's books match the broker's.
+* Boom/Crash multipliers are sold at a bounded profit/loss threshold or a
+  five-minute hold cap; the final broker-reported result is still required.
 """
 
 from __future__ import annotations
 
 import time
+from datetime import datetime
 from typing import Any, Callable, Dict, Optional
 
 from config import Config
@@ -57,7 +60,53 @@ class TradeMonitor:
         status = str(poc.get("status") or "").lower()
         if status in TERMINAL_STATUSES:
             return self._record_final(cid, poc)
+        row = self.storage.get_trade(cid)
+        if row and str(row.get("direction", "")).upper() in ("MULTUP", "MULTDOWN"):
+            return self._manage_multiplier(cid, row, poc)
         return {"status": status or "open", "profit": None, "resolved": False}
+
+    def _manage_multiplier(self, contract_id: int, trade: Dict[str, Any],
+                           state: Dict[str, Any]) -> Dict[str, Any]:
+        """Close a Boom/Crash multiplier at a modest P/L target/stop or time cap."""
+        live_profit = self._to_float(state.get("profit"))
+        stake = float(trade.get("stake") or 0.0)
+        raw_opened = str(trade.get("opened_at") or "")
+        try:
+            opened_at = datetime.fromisoformat(raw_opened)
+            now = self.storage.now()
+            if opened_at.tzinfo is None:
+                opened_at = opened_at.replace(tzinfo=now.tzinfo)
+            age = (now - opened_at).total_seconds()
+        except (TypeError, ValueError):
+            age = 0.0
+
+        reason = None
+        if live_profit is not None and live_profit >= stake * 0.50:
+            reason = "50% stake take-profit"
+        elif live_profit is not None and live_profit <= -stake * 0.50:
+            reason = "50% stake stop-loss"
+        elif age >= 300:
+            reason = "300 second maximum hold"
+        if reason is None:
+            return {"status": "open", "profit": live_profit, "resolved": False}
+
+        log.info("Closing multiplier contract %s: %s (live P/L %s)",
+                 contract_id, reason,
+                 f"{live_profit:+.2f}" if live_profit is not None else "unavailable")
+        try:
+            self.client.sell_contract(contract_id, 0.0)
+            final_state = self.client.open_contract(contract_id)
+        except DerivError as exc:
+            log.warning("Could not close multiplier contract %s: %s",
+                        contract_id, exc)
+            return {"status": "open", "profit": live_profit,
+                    "resolved": False, "reason": str(exc)}
+
+        status = str(final_state.get("status") or "").lower()
+        if status in TERMINAL_STATUSES:
+            return self._record_final(contract_id, final_state)
+        return {"status": status or "open", "profit": live_profit,
+                "resolved": False}
 
     # ------------------------------------------------------------------
     def wait_for_result(self, contract_id: int,
@@ -75,7 +124,10 @@ class TradeMonitor:
         # Duration in seconds + generous buffer for settlement.
         if timeout is None:
             unit_secs = {"s": 1, "m": 60, "h": 3600, "d": 86400, "t": 2}
-            base = self.cfg.duration * unit_secs.get(self.cfg.duration_unit, 60)
+            trade = self.storage.get_trade(int(contract_id)) or {}
+            base = int(trade.get("duration") or self.cfg.duration) * unit_secs.get(
+                trade.get("duration_unit") or self.cfg.duration_unit, 60
+            )
             timeout = base + 90
 
         deadline = time.time() + timeout
@@ -110,6 +162,13 @@ class TradeMonitor:
 
             if status in TERMINAL_STATUSES:
                 return self._record_final(contract_id, poc)
+
+            trade = self.storage.get_trade(int(contract_id))
+            if trade and str(trade.get("direction", "")).upper() in (
+                    "MULTUP", "MULTDOWN"):
+                result = self._manage_multiplier(int(contract_id), trade, poc)
+                if result.get("resolved"):
+                    return result
 
             time.sleep(poll_interval)
 

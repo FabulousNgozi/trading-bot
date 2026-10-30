@@ -2,8 +2,9 @@
 
 An automated **demo-only** trading bot for Deriv synthetic indices. It
 discovers active markets and rotates through available Volatility, Step,
-Crash/Boom, Jump and Range Break indices. It trades Rise/Fall contracts with
-a fixed $1 stake, a multi-timeframe trend-following strategy,
+Crash/Boom, Jump and Range Break indices. It trades Rise/Fall contracts on
+other supported indices and fixed-stake Multipliers on Boom/Crash, with
+multi-timeframe and spike-fade strategies,
 and hard risk limits that survive a restart.
 
 > **This bot cannot trade real money.** It refuses to start unless the
@@ -57,11 +58,17 @@ alternative. It also ranks approved signals using smoothed historical results
 by market and direction. For signaled markets it compares 1, 2, 3 and 5 minute
 expiries on separate chronological training and validation periods. It keeps
 the configured duration until a candidate has enough validation trades and
-positive returns; settled per-market outcomes can later guide the choice. It
-cannot change stake, account mode, or risk limits, and cannot bypass strategy
-confirmation gates. This learning runs locally; account and market data are
-not sent to an AI service. The stored history and win rates do not establish
-that a profile has a durable edge or predict future results.
+positive returns; settled per-market outcomes can later guide the choice.
+Boom/Crash use a separate spike-fade strategy and `MULTUP`/`MULTDOWN`
+multipliers instead of Rise/Fall. It waits for a large, closed spike candle,
+then trades toward the usual between-spike drift. The multiplier is fixed at
+2×; the bot requests a sale when observed P/L reaches +50% or -50% of stake,
+or after five minutes. These are monitored exit targets, not guaranteed fill
+prices. The AI does not tune this multiplier or its exit limits. It cannot
+change stake, account mode, or risk limits, and cannot bypass the existing
+risk gate. This learning runs locally; account and market data are not sent
+to an AI service. The stored history and win rates do not establish that a
+profile has a durable edge or predict future results.
 
 The learner's "research" is limited to this bot's own saved demo outcomes and
 closed-candle indicators. It does not search news or the public web: Deriv says

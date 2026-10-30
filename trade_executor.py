@@ -5,8 +5,8 @@ The executor is the only place a purchase can originate. It enforces a strict
 sequence and refuses to buy unless every check passes:
 
     1. risk manager says yes
-    2. contract type is actually offered for this symbol
-    3. a proposal is obtained for the configured stake and AI-selected duration
+    2. the correct contract type is offered for this symbol
+    3. a proposal is obtained for the configured stake and market-specific terms
     4. the proposal is validated against the config
     5. only then: buy
 
@@ -46,6 +46,9 @@ class ExecutionResult:
 
 
 class TradeExecutor:
+    BOOM_CRASH_MULTIPLIER = 2
+    MULTIPLIER_MAX_HOLD_SECONDS = 300
+
     def __init__(self, client: DerivClient, cfg: Config,
                  risk: RiskManager, storage: Storage) -> None:
         self.client = client
@@ -126,7 +129,105 @@ class TradeExecutor:
     # ------------------------------------------------------------------
     def execute(self, signal: Signal, symbol: str,
                 same_scan_batch: bool = False) -> ExecutionResult:
-        """Run the full gate and, if everything passes, buy."""
+        """Route a signal to its market-family execution policy."""
+        if signal.strategy_id == "boom_crash_spike_fade_v1":
+            return self._execute_boom_crash(signal, symbol, same_scan_batch)
+        return self._execute_rise_fall(signal, symbol, same_scan_batch)
+
+    def _execute_boom_crash(self, signal: Signal, symbol: str,
+                            same_scan_batch: bool) -> ExecutionResult:
+        """Place a bounded multiplier after the spike-fade signal."""
+        market = symbol.upper()
+        expected_direction, expected_contract = (
+            ("PUT", "MULTDOWN") if market.startswith("BOOM") else
+            ("CALL", "MULTUP") if market.startswith("CRASH") else
+            (None, None)
+        )
+        if expected_contract is None:
+            return ExecutionResult(
+                False, "Boom/Crash strategy cannot execute on another market family"
+            )
+        if (signal.direction != expected_direction
+                or signal.contract_type != expected_contract):
+            return ExecutionResult(
+                False, f"{market} spike-fade route requires {expected_contract}"
+            )
+        if not signal.actionable:
+            return ExecutionResult(False, "signal is not actionable")
+
+        decision = self.risk.can_trade(
+            stake=self.cfg.stake, same_scan_batch=same_scan_batch
+        )
+        if not decision.allowed:
+            return ExecutionResult(False, f"risk: {decision.reason}")
+
+        types = self.available_contract_types(symbol)
+        if expected_contract not in types:
+            return ExecutionResult(
+                False, f"{expected_contract} is not offered for {symbol}; "
+                       f"available: {sorted(types)[:8]}"
+            )
+
+        try:
+            prop = self.client.proposal(
+                symbol=symbol, contract_type=expected_contract,
+                stake=self.cfg.stake, duration=0, duration_unit="s",
+                multiplier=self.BOOM_CRASH_MULTIPLIER,
+            )
+        except (ProposalRejected, RateLimited, DerivError) as exc:
+            log.warning("Boom/Crash multiplier proposal failed for %s: %s",
+                        symbol, exc)
+            return ExecutionResult(False, f"multiplier proposal failed: {exc}")
+
+        if not prop.get("id") or prop.get("ask_price") is None:
+            return ExecutionResult(False, "invalid multiplier proposal", proposal=prop)
+        ask = float(prop["ask_price"])
+        if abs(ask - self.cfg.stake) > 0.01:
+            return ExecutionResult(
+                False, f"multiplier proposal ask {ask} != configured stake "
+                       f"{self.cfg.stake}", proposal=prop
+            )
+        currency = prop.get("currency")
+        if currency and str(currency).upper() != self.cfg.currency.upper():
+            return ExecutionResult(False, "multiplier proposal currency mismatch",
+                                   proposal=prop)
+
+        try:
+            receipt = self.client.buy_contract(str(prop["id"]), ask)
+        except DerivError as exc:
+            return ExecutionResult(False, f"multiplier buy failed: {exc}",
+                                   proposal=prop)
+        contract_id = receipt.get("contract_id")
+        if contract_id is None:
+            return ExecutionResult(False, "multiplier receipt had no contract_id",
+                                   proposal=prop)
+
+        buy_price = float(receipt.get("buy_price", ask))
+        rec = TradeRecord(
+            contract_id=int(contract_id), symbol=symbol,
+            index_value=signal.index_value, direction=expected_contract,
+            stake=buy_price, duration=self.MULTIPLIER_MAX_HOLD_SECONDS,
+            duration_unit="s", status="pending",
+            payout=float(receipt.get("payout", 0) or 0), buy_price=buy_price,
+            entry_spot=float(prop.get("spot")) if prop.get("spot") else None,
+            signal_score=signal.score,
+            signal_reasons=" | ".join(signal.reasons),
+            strategy_variant=signal.strategy_variant,
+            strategy_id=signal.strategy_id,
+        )
+        self.storage.insert_trade(rec)
+        self.storage.append_csv(rec)
+        self.risk.record_entry(self.cfg.stake)
+        log.info("Opened %s %s multiplier x%d stake=%.2f; auto-close at "
+                 "+/-50%% stake or 300s", symbol, expected_contract,
+                 self.BOOM_CRASH_MULTIPLIER, buy_price)
+        return ExecutionResult(True, "multiplier purchased",
+                               contract_id=int(contract_id), receipt=receipt,
+                               proposal=prop)
+
+    def _execute_rise_fall(self, signal: Signal, symbol: str,
+                           same_scan_batch: bool = False) -> ExecutionResult:
+        """Run the standard fixed-expiry Rise/Fall risk and proposal gates."""
         if not signal.actionable:
             return ExecutionResult(False, "signal is not actionable")
         contract_type = signal.direction

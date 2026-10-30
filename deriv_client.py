@@ -497,8 +497,9 @@ class DerivClient:
     # ==================================================================
     def proposal(self, symbol: str, contract_type: str, stake: float,
                  duration: int, duration_unit: str,
-                 currency: Optional[str] = None) -> Dict[str, Any]:
-        """Request a price proposal. Raises ProposalRejected on failure."""
+                 currency: Optional[str] = None,
+                 multiplier: Optional[int] = None) -> Dict[str, Any]:
+        """Request a fixed-expiry or multiplier proposal."""
         payload = {
             "proposal": 1,
             "amount": stake,
@@ -509,6 +510,9 @@ class DerivClient:
             "duration_unit": duration_unit,
             "underlying_symbol": symbol,
         }
+        if contract_type in ("MULTUP", "MULTDOWN"):
+            payload.pop("duration")
+            payload["multiplier"] = int(multiplier or 2)
         try:
             msg = self._send(payload)
         except ApiError as exc:
@@ -571,6 +575,14 @@ class DerivClient:
         if not poc:
             raise DerivError(f"No data for contract {contract_id}")
         return poc
+
+    def sell_contract(self, contract_id: int, price: float = 0.0) -> Dict[str, Any]:
+        """Sell an open contract using the broker's current available price."""
+        msg = self._send({"sell": int(contract_id), "price": float(price)})
+        receipt = (msg or {}).get("sell")
+        if not receipt:
+            raise DerivError(f"No sell receipt for contract {contract_id}")
+        return receipt
 
     def subscribe_contract(self, contract_id: int,
                            callback: Callable[[Dict[str, Any]], None]) -> str:

@@ -35,6 +35,7 @@ closed bars only, and the entry is assumed to occur at the next bar's open.
 
 from __future__ import annotations
 
+import statistics
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -90,10 +91,12 @@ class Signal:
     strategy_id: str = "trend_confluence_v1"
     selected_duration: Optional[int] = None
     selected_duration_unit: str = "m"
+    contract_type: Optional[str] = None
 
     @property
     def actionable(self) -> bool:
-        return self.direction in ("CALL", "PUT")
+        return (self.direction in ("CALL", "PUT")
+                or self.contract_type in ("MULTUP", "MULTDOWN"))
 
     def summary(self) -> str:
         return (
@@ -334,3 +337,83 @@ class Strategy:
             key=lambda s: s.score,
             reverse=True,
         )
+
+
+class BoomCrashStrategy:
+    """Fade a completed spike toward the index's usual between-spike drift.
+
+    Boom indices spike upward and tend to drift down between spikes; Crash
+    indices spike downward and tend to drift up. This strategy waits for a
+    large, closed 1m candle, then takes a small fixed-multiplier contract in
+    the opposite direction. It does not claim to predict when spikes occur.
+    """
+
+    strategy_id = "boom_crash_spike_fade_v1"
+
+    def __init__(self, cfg: Config) -> None:
+        self.cfg = cfg
+
+    def evaluate(self, symbol: str, series: Dict[str, CandleSeries],
+                 index_value: Optional[int] = None,
+                 now: Optional[float] = None) -> Signal:
+        market = symbol.upper()
+        if market.startswith("BOOM"):
+            direction, contract_type, spike_direction, drift = (
+                "PUT", "MULTDOWN", 1, "down"
+            )
+            family = "Boom"
+        elif market.startswith("CRASH"):
+            direction, contract_type, spike_direction, drift = (
+                "CALL", "MULTUP", -1, "up"
+            )
+            family = "Crash"
+        else:
+            return Signal(symbol, index_value, "NONE", 0,
+                          ["not a Boom/Crash market"])
+
+        c1m = series["1m"].completed(now)
+        if len(c1m) < 31:
+            return Signal(symbol, index_value, "NONE", 0,
+                          ["Boom/Crash spike study needs 31 completed 1m candles"])
+
+        previous, last = c1m[-31:-1], c1m[-1]
+        prior_bodies = [abs(c.close - c.open) for c in previous]
+        prior_ranges = [max(0.0, c.high - c.low) for c in previous]
+        median_body = statistics.median(prior_bodies)
+        median_range = statistics.median(prior_ranges)
+        body = abs(last.close - last.open)
+        full_range = max(0.0, last.high - last.low)
+        sign = 1 if last.close > last.open else -1 if last.close < last.open else 0
+        body_ratio = body / full_range if full_range else 0.0
+        threshold = max(4.5, min(
+            8.0, 6.0 + (self.cfg.min_signal_score - 60) * 0.08
+        ))
+        body_multiple = body / median_body if median_body > 0 else 0.0
+        is_spike = (
+            sign == spike_direction
+            and body_ratio >= 0.60
+            and body >= max(median_body * threshold, median_range * 1.8)
+        )
+        score = min(100, int(65 + max(0.0, body_multiple - threshold) * 8))
+        reasons = [
+            f"{family} spike-fade strategy",
+            f"latest body {body_multiple:.1f}x prior median; threshold {threshold:.1f}x",
+            f"expected between-spike drift: {drift}",
+            (f"confirmed closed spike; candidate {direction}" if is_spike
+             else "waiting for a confirmed spike candle"),
+        ]
+        return Signal(
+            symbol=symbol, index_value=index_value,
+            direction=direction if is_spike else "NONE",
+            score=score if is_spike else 0, reasons=reasons,
+            price=last.close, candle_epoch=last.epoch,
+            trend_1m=drift, trend_1h="spike-fade",
+            contract_type=contract_type if is_spike else None,
+        )
+
+
+def strategy_for_market(symbol: str, cfg: Config):
+    """Route Boom/Crash indices to their dedicated spike-fade strategy."""
+    if symbol.upper().startswith(("BOOM", "CRASH")):
+        return BoomCrashStrategy(cfg)
+    return Strategy(cfg)

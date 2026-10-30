@@ -54,7 +54,7 @@ from deriv_client import (
 )
 from logger_config import RedactionFilter, get_logger, setup_logging
 from storage import Storage
-from strategy import Signal
+from strategy import Signal, strategy_for_market
 
 from .state import (
     ERROR,
@@ -237,15 +237,11 @@ class WebBot(TradingBot):
             })
             return
 
-        if self.cfg.ai_brain_enabled:
-            policy, scan_strategy, study = self.ai_brain.select_strategy(
-                type(self.strategy)
-            )
-        else:
-            policy, scan_strategy = "baseline", self.strategy
-            study = {"enabled": False,
-                     "status": "Disabled — using strategy score only.",
-                     "policy_stats": {}}
+        study = (self.ai_brain.research_state()
+                 if self.cfg.ai_brain_enabled else
+                 {"enabled": False,
+                  "status": "Disabled — using strategy score only.",
+                  "policy_stats": {}})
 
         signals: List[Signal] = []
         rows: List[Dict[str, Any]] = []
@@ -269,6 +265,15 @@ class WebBot(TradingBot):
                     idx, symbol, "warming up — not enough completed candles"))
                 continue
 
+            market_strategy = strategy_for_market(symbol, self.cfg)
+            if self.cfg.ai_brain_enabled:
+                policy, scan_strategy, market_study = self.ai_brain.select_strategy(
+                    type(market_strategy)
+                )
+                study = market_study
+            else:
+                policy, scan_strategy = "baseline", market_strategy
+
             sig = scan_strategy.evaluate(symbol, series, index_value=idx)
             sig.strategy_variant = policy
             sig.strategy_id = getattr(scan_strategy, "strategy_id",
@@ -280,6 +285,13 @@ class WebBot(TradingBot):
                 sig.selected_duration = int(choice["duration"])
                 sig.selected_duration_unit = str(choice["duration_unit"])
                 duration_choices[symbol] = choice
+            elif sig.strategy_id == "boom_crash_spike_fade_v1":
+                sig.selected_duration = 300
+                sig.selected_duration_unit = "s"
+                duration_choices[symbol] = {
+                    "source": "multiplier auto-management",
+                    "note": "Close at +/-50% of stake or after 300 seconds.",
+                }
             self._log_signal(sig)
 
             repeat = False
@@ -321,6 +333,7 @@ class WebBot(TradingBot):
         )
         study["ranked"] = [
             {"symbol": sig.symbol, "direction": sig.direction,
+             "contract_type": sig.contract_type or sig.direction,
              "strategy_score": sig.score, "ai_score": sig.ai_score,
              "note": sig.ai_note, "policy": sig.strategy_variant,
              "duration": sig.selected_duration or self.cfg.duration,
@@ -481,6 +494,7 @@ class WebBot(TradingBot):
             "ai_note": sig.ai_note,
             "strategy_variant": sig.strategy_variant,
             "strategy_id": sig.strategy_id,
+            "contract_type": sig.contract_type or sig.direction,
             "duration": sig.selected_duration,
             "duration_unit": sig.selected_duration_unit,
             "direction": sig.direction,
@@ -634,11 +648,18 @@ class BotService:
 
         if timeout is None:
             unit_seconds = {"s": 1, "m": 60, "h": 3600, "d": 86400, "t": 2}
-            contract_seconds = (
-                int(bot.cfg.duration)
-                * unit_seconds.get(bot.cfg.duration_unit, 60)
-            )
-            timeout = contract_seconds + 120
+            pending = bot.storage.get_open_trades()
+            contract_seconds = max((
+                int(trade.get("duration") or bot.cfg.duration)
+                * unit_seconds.get(trade.get("duration_unit") or
+                                    bot.cfg.duration_unit, 60)
+                for trade in pending
+            ), default=(int(bot.cfg.duration)
+                        * unit_seconds.get(bot.cfg.duration_unit, 60)))
+            # A scan already in progress may open a 300-second managed
+            # multiplier after this snapshot, so keep the join window large
+            # enough for that newly opened position to be closed and recorded.
+            timeout = max(contract_seconds + 120, 420)
 
         STATE.set_status(STOPPING, "Stopping — finishing open contract …")
         self._pause.clear()
