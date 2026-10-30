@@ -176,7 +176,7 @@ class TradingBot:
             return
 
         # 2. Risk gate.
-        decision = self.risk.can_trade(stake=self.cfg.stake)
+        decision = self.risk.can_trade(stake=self.risk.next_stake())
         if not decision.allowed:
             log.info("Paused — %s", decision.reason)
             return
@@ -197,6 +197,9 @@ class TradingBot:
             if not self.market.warmup_ok(series):
                 log.debug("%s: not enough history yet", symbol)
                 continue
+
+            completed_1m = series["1m"].completed()
+            self.storage.resolve_shadow_signals(symbol, completed_1m)
 
             market_strategy = strategy_for_market(symbol, self.cfg)
             if self.cfg.ai_brain_enabled:
@@ -227,6 +230,10 @@ class TradingBot:
             elif sig.strategy_id == "boom_crash_spike_fade_v1":
                 sig.selected_duration = 300
                 sig.selected_duration_unit = "s"
+            if sig.actionable:
+                sig.shadow_id = self.storage.record_shadow_signal(
+                    sig, sig.selected_duration or self.cfg.duration
+                )
             self._log_signal(sig)
 
             # 5. Never re-enter on the same completed candle.
@@ -280,6 +287,7 @@ class TradingBot:
 
             if candidate.candle_epoch is not None:
                 self._last_signal_epoch[candidate.symbol] = candidate.candle_epoch
+            self.storage.mark_shadow_selected(candidate.shadow_id)
             opened += 1
         if opened:
             log.info("Opened %d contract(s) this scan; now %d/%d open",

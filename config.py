@@ -165,6 +165,10 @@ class Config:
     max_consecutive_losses: int = 3
     daily_loss_limit: float = 5.0
     daily_profit_target: float = 0.0
+    martingale_enabled: bool = False
+    martingale_multiplier: float = 2.0
+    martingale_max_steps: int = 2
+    martingale_max_stake: float = 4.0
     cooldown_seconds: int = 0
     # 0 disables only the daily entry-count cap.
     max_trades_per_day: int = 0
@@ -190,6 +194,11 @@ class Config:
     require_candle_confirmation: bool = True
     scan_interval_seconds: int = 15
     ai_brain_enabled: bool = True
+    openai_api_key: str = ""
+    openai_model: str = "gpt-6-luna"
+    openai_advisor_enabled: bool = False
+    openai_timeout_seconds: float = 6.0
+    openai_min_interval_seconds: int = 30
 
     # --- storage -----------------------------------------------------------
     db_path: str = "data/bot.db"
@@ -218,6 +227,10 @@ class Config:
             "max_consecutive_losses": self.max_consecutive_losses,
             "daily_loss_limit": self.daily_loss_limit,
             "daily_profit_target": self.daily_profit_target,
+            "martingale_enabled": self.martingale_enabled,
+            "martingale_multiplier": self.martingale_multiplier,
+            "martingale_max_steps": self.martingale_max_steps,
+            "martingale_max_stake": self.martingale_max_stake,
             "cooldown_seconds": self.cooldown_seconds,
             "max_trades_per_day": self.max_trades_per_day,
             "loss_cooldown_minutes": self.loss_cooldown_minutes,
@@ -225,6 +238,9 @@ class Config:
             "market_scan": "all active synthetic indices",
             "min_signal_score": self.min_signal_score,
             "ai_brain_enabled": self.ai_brain_enabled,
+            "openai_advisor_enabled": self.openai_advisor_enabled,
+            "openai_api_key_set": bool(self.openai_api_key),
+            "openai_model": self.openai_model,
             "scan_interval_seconds": self.scan_interval_seconds,
             "db_path": self.db_path,
             "csv_path": self.csv_path,
@@ -332,6 +348,7 @@ def load_config(env_file: Optional[str] = None, require_credentials: bool = True
 
     stake = _env_float("STAKE", 1.0, 0.01, 1000.0)
 
+    openai_api_key = (_env("OPENAI_API_KEY", "") or "").strip()
     cfg = Config(
         app_id=app_id,
         api_token=token,
@@ -345,6 +362,10 @@ def load_config(env_file: Optional[str] = None, require_credentials: bool = True
         max_consecutive_losses=_env_int("MAX_CONSECUTIVE_LOSSES", 3, 1, 50),
         daily_loss_limit=_env_float("DAILY_LOSS_LIMIT", 5.0, 0.01, 100000),
         daily_profit_target=_env_float("DAILY_PROFIT_TARGET", 0.0, 0, 100000),
+        martingale_enabled=_env_bool("MARTINGALE_ENABLED", False),
+        martingale_multiplier=_env_float("MARTINGALE_MULTIPLIER", 2.0, 1.1, 3.0),
+        martingale_max_steps=_env_int("MARTINGALE_MAX_STEPS", 2, 1, 3),
+        martingale_max_stake=_env_float("MARTINGALE_MAX_STAKE", 4.0, 0.01, 1000.0),
         cooldown_seconds=_env_int("COOLDOWN_SECONDS", 0, 0, 86400),
         max_trades_per_day=_env_int("MAX_TRADES_PER_DAY", 0, 0, 1000),
         loss_cooldown_minutes=_env_int("LOSS_COOLDOWN_MINUTES", 60, 0, 10080),
@@ -363,6 +384,13 @@ def load_config(env_file: Optional[str] = None, require_credentials: bool = True
         require_candle_confirmation=_env_bool("REQUIRE_CANDLE_CONFIRMATION", True),
         scan_interval_seconds=_env_int("SCAN_INTERVAL_SECONDS", 15, 1, 3600),
         ai_brain_enabled=_env_bool("AI_BRAIN_ENABLED", True),
+        openai_api_key=openai_api_key,
+        openai_model=(_env("OPENAI_MODEL", "gpt-6-luna") or "gpt-6-luna").strip(),
+        openai_advisor_enabled=_env_bool(
+            "OPENAI_ADVISOR_ENABLED", bool(openai_api_key)),
+        openai_timeout_seconds=_env_float("OPENAI_TIMEOUT_SECONDS", 6.0, 2.0, 30.0),
+        openai_min_interval_seconds=_env_int(
+            "OPENAI_MIN_INTERVAL_SECONDS", 30, 5, 3600),
         db_path=_env("DB_PATH", "data/bot.db") or "data/bot.db",
         csv_path=_env("CSV_PATH", "data/trades.csv") or "data/trades.csv",
         log_level=(_env("LOG_LEVEL", "INFO") or "INFO").upper(),
@@ -373,6 +401,8 @@ def load_config(env_file: Optional[str] = None, require_credentials: bool = True
     # it here so the failure is loud and early.
     if cfg.stake <= 0:
         raise ConfigError("STAKE must be greater than zero")
+    if cfg.martingale_enabled and cfg.martingale_max_stake < cfg.stake:
+        raise ConfigError("MARTINGALE_MAX_STAKE must be at least STAKE")
 
     return cfg
 

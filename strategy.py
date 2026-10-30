@@ -92,6 +92,8 @@ class Signal:
     selected_duration: Optional[int] = None
     selected_duration_unit: str = "m"
     contract_type: Optional[str] = None
+    price_action: Dict[str, object] = field(default_factory=dict)
+    shadow_id: Optional[int] = None
 
     @property
     def actionable(self) -> bool:
@@ -259,6 +261,19 @@ class Strategy:
             support=sup, resistance=res, price=price,
             candle_epoch=last.epoch,
             trend_1m=trend_1m, trend_1h=trend_1h,
+            price_action={
+                "setup_key": "|".join((trend_1m, trend_1h,
+                    "rsi_low" if rv < 40 else "rsi_mid" if rv < 60 else "rsi_high",
+                    "sr_reaction" if sr_ok else "no_sr_reaction",
+                    "candle_confirm" if candle_ok else "no_candle_confirm")),
+                "trend_1m": trend_1m, "trend_1h": trend_1h,
+                "rsi": round(float(rv), 2), "atr": round(float(av), 8) if av is not None else None,
+                "sr_reaction": bool(sr_ok), "candle_confirmation": bool(candle_ok),
+                "ema_alignment": "bullish" if trend_1m == "up" else "bearish" if trend_1m == "down" else "sideways",
+                "candle_body": round(abs(last.close - last.open), 8),
+                "candle_range": round(max(0.0, last.high - last.low), 8),
+                "close_location": round((last.close - last.low) / max(last.high - last.low, 1e-12), 3),
+            },
         )
 
     # ------------------------------------------------------------------
@@ -409,6 +424,13 @@ class BoomCrashStrategy:
             price=last.close, candle_epoch=last.epoch,
             trend_1m=drift, trend_1h="spike-fade",
             contract_type=contract_type if is_spike else None,
+            price_action={
+                "setup_key": f"{family.lower()}_spike_fade|body_{'extreme' if body_multiple >= threshold * 1.5 else 'large'}|range_{'wide' if median_range and full_range >= median_range * 2 else 'normal'}",
+                "family": family, "spike_direction": "up" if sign > 0 else "down" if sign < 0 else "flat",
+                "drift_direction": drift, "body_multiple": round(body_multiple, 3),
+                "body_ratio": round(body_ratio, 3), "median_body": round(median_body, 8),
+                "median_range": round(median_range, 8), "threshold": round(threshold, 3),
+            },
         )
 
 

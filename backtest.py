@@ -76,6 +76,8 @@ class BacktestResult:
     end_epoch: int = 0
     granularity: int = 60
     payout_multiple: float = 1.95
+    payout_source: str = "configured fallback"
+    payout_samples: int = 0
     stake: float = 1.0
     initial_balance: float = 0.0
     duration_minutes: int = 1
@@ -163,6 +165,8 @@ class BacktestResult:
             "assumptions": {
                 "stake": self.stake,
                 "payout_multiple": self.payout_multiple,
+                "payout_source": self.payout_source,
+                "payout_samples": self.payout_samples,
                 "entry": "next bar open",
                 "tie_handling": "tie = loss",
                 "slippage_modelled": False,
@@ -184,7 +188,10 @@ class Backtester:
             initial_balance: float = 1000.0,
             duration_minutes: int = 1,
             start_index: Optional[int] = None,
-            end_index: Optional[int] = None) -> BacktestResult:
+            end_index: Optional[int] = None,
+            payout_multiple: Optional[float] = None,
+            payout_source: str = "configured fallback",
+            payout_samples: int = 0) -> BacktestResult:
         """
         Replay a candle history.
 
@@ -204,12 +211,15 @@ class Backtester:
         c5m = list(candles_5m) if candles_5m else aggregate(c1m, 300)
         c1h = list(candles_1h) if candles_1h else aggregate(c1m, 3600)
 
+        effective_payout = payout_multiple or self.payout_multiple
         result = BacktestResult(
             symbol=symbol,
             start_epoch=c1m[0].epoch,
             end_epoch=c1m[-1].epoch,
             granularity=60,
-            payout_multiple=self.payout_multiple,
+            payout_multiple=effective_payout,
+            payout_source=payout_source,
+            payout_samples=payout_samples,
             stake=self.cfg.stake,
             initial_balance=initial_balance,
             duration_minutes=duration_minutes,
@@ -262,7 +272,7 @@ class Backtester:
                 won = exit_price < entry_price
 
             stake = self.cfg.stake
-            payout = round(stake * self.payout_multiple, 2)
+            payout = round(stake * effective_payout, 2)
             profit = round(payout - stake, 2) if won else -stake
 
             result.trades.append(BacktestTrade(
@@ -288,7 +298,8 @@ class Backtester:
     def run_duration_study(self, symbol: str,
                            candles_1m: Sequence[Candle],
                            candles_5m: Optional[Sequence[Candle]] = None,
-                           candles_1h: Optional[Sequence[Candle]] = None
+                           candles_1h: Optional[Sequence[Candle]] = None,
+                           payout_estimates: Optional[Dict[int, Dict[str, float]]] = None
                            ) -> Dict[int, Dict[str, object]]:
         """Compare duration choices on chronological training and validation sets."""
         c1m = list(candles_1m)
@@ -327,7 +338,11 @@ class Backtester:
                 exit_price = c1m[i + duration].close
                 won = (exit_price > entry if direction == "CALL"
                        else exit_price < entry)
-                profit = (round(self.cfg.stake * (self.payout_multiple - 1), 2)
+                estimate = (payout_estimates or {}).get(duration, {})
+                payout_multiple = (float(estimate.get("payout_multiple", self.payout_multiple))
+                                   if int(estimate.get("samples", 0)) >= 8
+                                   else self.payout_multiple)
+                profit = (round(self.cfg.stake * (payout_multiple - 1), 2)
                           if won else -self.cfg.stake)
                 trades += 1
                 wins += int(won)
@@ -355,6 +370,11 @@ class Backtester:
                 "validation_win_rate": round(validation["win_rate"], 2),
                 "validation_net_profit": validation["net_profit"],
                 "validation_drawdown": validation["drawdown"],
+                "payout_multiple": (float((payout_estimates or {}).get(duration, {}).get(
+                    "payout_multiple", self.payout_multiple))
+                    if int((payout_estimates or {}).get(duration, {}).get("samples", 0)) >= 8
+                    else self.payout_multiple),
+                "payout_samples": int((payout_estimates or {}).get(duration, {}).get("samples", 0)),
             }
         return out
 
@@ -449,6 +469,8 @@ def format_report(results: Sequence[BacktestResult]) -> str:
         pf = s["profit_factor"]
         lines.append(f"  Profit factor    : {pf if pf is not None else 'n/a'}")
         lines.append(f"  Payout multiple  : {s['assumptions']['payout_multiple']}x")
+        lines.append(f"  Payout source    : {s['assumptions']['payout_source']} "
+                     f"({s['assumptions']['payout_samples']} observed wins)")
         lines.append("")
 
     lines.append("=" * 78)
@@ -508,8 +530,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                         "Volatility indices)")
     p.add_argument("--count", type=int, default=1000,
                    help="Candles per timeframe (max 1000, default 1000)")
-    p.add_argument("--payout", type=float, default=1.95,
-                   help="Payout multiple, e.g. 1.95 for a 95%% return")
+    p.add_argument("--payout", type=float, default=None,
+                   help="Fallback payout multiple (default 1.95); per-market observed wins are used when available")
     p.add_argument("--balance", type=float, default=1000.0,
                    help="Starting balance for return/drawdown (default 1000)")
     p.add_argument("--csv", default="data/backtest_report.csv",
@@ -526,7 +548,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     ensure_data_dir(cfg)
 
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
-    bt = Backtester(cfg, payout_multiple=args.payout)
+    fallback_payout = args.payout or 1.95
+    bt = Backtester(cfg, payout_multiple=fallback_payout)
+    from storage import payout_estimates_from_db
     results: List[BacktestResult] = []
 
     for sym in symbols:
@@ -544,8 +568,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             if len(c1m) < cfg.ema_slow + 10:
                 print(f"  skipped: only {len(c1m)} 1m candles")
                 continue
-            results.append(bt.run(sym, c1m, c5m, c1h,
-                                  initial_balance=args.balance))
+            estimate = payout_estimates_from_db(cfg.db_path, sym).get(1, {})
+            observed = int(estimate.get("samples", 0)) >= 8
+            results.append(bt.run(
+                sym, c1m, c5m, c1h, initial_balance=args.balance,
+                payout_multiple=(float(estimate["payout_multiple"])
+                                 if observed else fallback_payout),
+                payout_source=("recent settled demo wins" if observed
+                               else "configured fallback"),
+                payout_samples=int(estimate.get("samples", 0)),
+            ))
         except Exception as exc:
             print(f"  {sym}: failed — {exc}")
 

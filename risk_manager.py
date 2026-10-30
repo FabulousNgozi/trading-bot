@@ -76,7 +76,7 @@ class RiskManager:
             )
         return RiskDecision(True)
 
-    def check_daily_loss(self) -> RiskDecision:
+    def check_daily_loss(self, next_stake: Optional[float] = None) -> RiskDecision:
         state = self.storage.get_daily_state()
         pnl = state["realised_pnl"]
         if pnl <= -abs(self.cfg.daily_loss_limit):
@@ -84,6 +84,13 @@ class RiskManager:
                 False,
                 f"daily loss limit reached: {pnl:.2f} "
                 f"(limit -{self.cfg.daily_loss_limit:.2f})",
+                "daily_loss_limit",
+            )
+        if next_stake is not None and pnl - next_stake <= -abs(self.cfg.daily_loss_limit):
+            return RiskDecision(
+                False,
+                f"next stake {next_stake:.2f} could reach the daily loss limit "
+                f"from P/L {pnl:.2f} (limit -{self.cfg.daily_loss_limit:.2f})",
                 "daily_loss_limit",
             )
         return RiskDecision(True)
@@ -162,19 +169,27 @@ class RiskManager:
 
     def check_stake(self, stake: float) -> RiskDecision:
         """
-        The stake must equal the configured fixed stake.
-
-        This is the anti-martingale guard: no code path may pass a larger
-        stake, and there is no "recovery" multiplier anywhere in the bot.
+        Permit only the exact next bounded stake calculated by this manager.
         """
-        if abs(stake - self.cfg.stake) > 1e-9:
+        expected = self.next_stake()
+        if abs(stake - expected) > 1e-9:
             return RiskDecision(
-                False,
-                f"stake {stake} does not match configured fixed stake "
-                f"{self.cfg.stake} — stake escalation is not permitted",
+                False, f"stake {stake} does not match approved next stake {expected}",
                 "stake_mismatch",
             )
         return RiskDecision(True)
+
+    def next_stake(self) -> float:
+        """Return the configured stake or a capped loss-recovery stake."""
+        if not self.cfg.martingale_enabled:
+            return self.cfg.stake
+        steps = min(self.storage.get_consecutive_losses(),
+                    self.cfg.martingale_max_steps)
+        if steps == 0:
+            return self.cfg.stake
+        amount = min(self.cfg.stake * self.cfg.martingale_multiplier ** steps,
+                     self.cfg.martingale_max_stake)
+        return round(amount, 2)
 
     # ------------------------------------------------------------------
     # Aggregate
@@ -187,12 +202,13 @@ class RiskManager:
         Order matters for the log: the most fundamental blocker is reported
         first so the operator sees the real reason, not a downstream symptom.
         """
+        approved_stake = self.next_stake() if stake is None else stake
         checks = [
             self.check_unresolved,
             self.check_open_contracts,
             self.check_pause,
             self.check_consecutive_losses,
-            self.check_daily_loss,
+            lambda: self.check_daily_loss(approved_stake),
             self.check_daily_profit_target,
             self.check_daily_trade_count,
         ]
@@ -206,10 +222,9 @@ class RiskManager:
             d = self.check_cooldown()
             if not d.allowed:
                 return d
-        if stake is not None:
-            d = self.check_stake(stake)
-            if not d.allowed:
-                return d
+        d = self.check_stake(approved_stake)
+        if not d.allowed:
+            return d
         return RiskDecision(True, "all risk checks passed", "ok")
 
     # ------------------------------------------------------------------
@@ -271,6 +286,11 @@ class RiskManager:
             "max_consecutive_losses": self.cfg.max_consecutive_losses,
             "daily_loss_limit": self.cfg.daily_loss_limit,
             "daily_profit_target": self.cfg.daily_profit_target,
+            "martingale_enabled": self.cfg.martingale_enabled,
+            "martingale_step": min(self.storage.get_consecutive_losses(),
+                                    self.cfg.martingale_max_steps),
+            "next_stake": self.next_stake(),
+            "martingale_max_stake": self.cfg.martingale_max_stake,
             "open_contracts": self.storage.count_open_trades(),
             "max_open_contracts": self.cfg.max_open_contracts,
             "paused_until": paused_until.isoformat() if paused_until else None,

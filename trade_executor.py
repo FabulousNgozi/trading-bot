@@ -6,16 +6,18 @@ sequence and refuses to buy unless every check passes:
 
     1. risk manager says yes
     2. the correct contract type is offered for this symbol
-    3. a proposal is obtained for the configured stake and market-specific terms
+    3. a proposal is obtained for the risk manager's approved stake and terms
     4. the proposal is validated against the config
     5. only then: buy
 
 If the proposal is rejected, or the stake is not permitted, the trade is
-abandoned. The stake is **never** silently increased to make a proposal work —
-that is the single most common way a "safe" bot becomes an unsafe one.
+abandoned. An optional bounded recovery progression is calculated by the risk
+manager; proposal prices are never used to alter that approved stake.
 """
 
 from __future__ import annotations
+
+import json
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -76,7 +78,8 @@ class TradeExecutor:
     def validate_proposal(self, prop: Dict[str, Any], symbol: str,
                           contract_type: str,
                           duration: Optional[int] = None,
-                          duration_unit: Optional[str] = None) -> tuple:
+                          duration_unit: Optional[str] = None,
+                          expected_stake: Optional[float] = None) -> tuple:
         """
         Check a proposal against the configuration.
 
@@ -90,10 +93,12 @@ class TradeExecutor:
         if ask is None:
             return False, "proposal has no ask_price"
         # The ask price is what we actually pay. It must equal the stake.
-        if abs(float(ask) - self.cfg.stake) > 0.01:
+        expected_stake = (self.cfg.stake if expected_stake is None
+                          else expected_stake)
+        if abs(float(ask) - expected_stake) > 0.01:
             return False, (
-                f"proposal ask_price {ask} != configured stake "
-                f"{self.cfg.stake} — refusing to trade at a different size"
+                f"proposal ask_price {ask} != approved stake "
+                f"{expected_stake} — refusing to trade at a different size"
             )
 
         payout = prop.get("payout")
@@ -155,8 +160,9 @@ class TradeExecutor:
         if not signal.actionable:
             return ExecutionResult(False, "signal is not actionable")
 
+        stake = self.risk.next_stake()
         decision = self.risk.can_trade(
-            stake=self.cfg.stake, same_scan_batch=same_scan_batch
+            stake=stake, same_scan_batch=same_scan_batch
         )
         if not decision.allowed:
             return ExecutionResult(False, f"risk: {decision.reason}")
@@ -171,7 +177,7 @@ class TradeExecutor:
         try:
             prop = self.client.proposal(
                 symbol=symbol, contract_type=expected_contract,
-                stake=self.cfg.stake, duration=0, duration_unit="s",
+                stake=stake, duration=0, duration_unit="s",
                 multiplier=self.BOOM_CRASH_MULTIPLIER,
             )
         except (ProposalRejected, RateLimited, DerivError) as exc:
@@ -182,10 +188,10 @@ class TradeExecutor:
         if not prop.get("id") or prop.get("ask_price") is None:
             return ExecutionResult(False, "invalid multiplier proposal", proposal=prop)
         ask = float(prop["ask_price"])
-        if abs(ask - self.cfg.stake) > 0.01:
+        if abs(ask - stake) > 0.01:
             return ExecutionResult(
                 False, f"multiplier proposal ask {ask} != configured stake "
-                       f"{self.cfg.stake}", proposal=prop
+                       f"{stake}", proposal=prop
             )
         currency = prop.get("currency")
         if currency and str(currency).upper() != self.cfg.currency.upper():
@@ -212,12 +218,17 @@ class TradeExecutor:
             entry_spot=float(prop.get("spot")) if prop.get("spot") else None,
             signal_score=signal.score,
             signal_reasons=" | ".join(signal.reasons),
+            signal_features=json.dumps(signal.price_action, sort_keys=True),
+            base_stake=self.cfg.stake,
+            martingale_enabled=int(self.cfg.martingale_enabled),
+            martingale_step=min(self.storage.get_consecutive_losses(),
+                                self.cfg.martingale_max_steps),
             strategy_variant=signal.strategy_variant,
             strategy_id=signal.strategy_id,
         )
         self.storage.insert_trade(rec)
         self.storage.append_csv(rec)
-        self.risk.record_entry(self.cfg.stake)
+        self.risk.record_entry(buy_price)
         log.info("Opened %s %s multiplier x%d stake=%.2f; auto-close at "
                  "+/-50%% stake or 300s", symbol, expected_contract,
                  self.BOOM_CRASH_MULTIPLIER, buy_price)
@@ -244,8 +255,9 @@ class TradeExecutor:
             return ExecutionResult(False, f"unsupported signal direction: {contract_type}")
 
         # 1. Risk gate.
+        stake = self.risk.next_stake()
         decision = self.risk.can_trade(
-            stake=self.cfg.stake, same_scan_batch=same_scan_batch
+            stake=stake, same_scan_batch=same_scan_batch
         )
         if not decision.allowed:
             log.info("Trade blocked by risk: %s", decision.reason)
@@ -269,7 +281,7 @@ class TradeExecutor:
             prop = self.client.proposal(
                 symbol=symbol,
                 contract_type=contract_type,
-                stake=self.cfg.stake,
+                stake=stake,
                 duration=duration,
                 duration_unit=duration_unit,
             )
@@ -285,7 +297,8 @@ class TradeExecutor:
 
         # 4. Validate.
         ok, reason = self.validate_proposal(
-            prop, symbol, contract_type, duration, duration_unit
+            prop, symbol, contract_type, duration, duration_unit,
+            expected_stake=stake,
         )
         if not ok:
             log.warning("Proposal failed validation for %s: %s", symbol, reason)
@@ -327,12 +340,17 @@ class TradeExecutor:
             entry_spot=float(prop.get("spot")) if prop.get("spot") else None,
             signal_score=signal.score,
             signal_reasons=" | ".join(signal.reasons),
+            signal_features=json.dumps(signal.price_action, sort_keys=True),
+            base_stake=self.cfg.stake,
+            martingale_enabled=int(self.cfg.martingale_enabled),
+            martingale_step=min(self.storage.get_consecutive_losses(),
+                                self.cfg.martingale_max_steps),
             strategy_variant=signal.strategy_variant,
             strategy_id=signal.strategy_id,
         )
         self.storage.insert_trade(rec)
         self.storage.append_csv(rec)
-        self.risk.record_entry(self.cfg.stake)
+        self.risk.record_entry(rec.stake)
 
         log.info(
             "Contract opened: id=%s %s %s stake=%.2f payout=%.2f",

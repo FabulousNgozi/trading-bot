@@ -220,6 +220,10 @@ function renderStatus(snap) {
     ? `Current strategy: ${brain.selected_policy} · ${brain.phase || 'studying'}. `
     : '';
   $('brain-status').textContent = selected + (brain.status || 'Waiting for bot status.');
+  const advisor = brain.model_advisor || {};
+  const advisorLabel = advisor.state
+    ? `Model advisor: ${advisor.state} — ${advisor.detail || ''}`
+    : '';
   const ranked = brain.ranked || [];
   const rankingText = ranked.length
     ? 'Current ranking: ' + ranked.map((item, i) =>
@@ -229,16 +233,31 @@ function renderStatus(snap) {
   const profileStats = brain.policy_stats || {};
   const studyText = Object.entries(profileStats).map(([name, row]) => {
     const rate = row.win_rate == null ? 'not measured' : `${row.win_rate}% wins`;
-    return `${name}: ${row.trades} trades, ${rate}, P/L ${row.net_profit}`;
+    return `${name}: ${row.trades} trades, ${rate}, flat P/L ${row.flat_net_profit}, DD ${row.max_drawdown}, avg W/L ${row.average_win}/${row.average_loss}, longest loss run ${row.max_losing_streak}`;
   }).join('  |  ');
   const durationStudies = ranked.flatMap((item) => (item.duration_study || []).map((row) =>
-    `${item.symbol} ${row.duration_minutes}m: ${row.validation_win_rate}% over ${row.validation_trades} validation trades, P/L ${row.validation_net_profit}`
+    `${item.symbol} ${row.duration_minutes}m: ${row.validation_win_rate}% over ${row.validation_trades} validation trades, P/L ${row.validation_net_profit}, DD ${row.validation_drawdown}, payout ${row.payout_multiple}x (${row.payout_samples} observed wins)`
   )).join('  |  ');
+  const priceActionStudies = (brain.price_action_stats || []).map((row) =>
+    `${row.symbol} ${row.setup_key} (${row.policy}): ${row.wins}/${row.trades} wins, ${row.win_rate}% · actual P/L ${row.net_profit}, flat P/L ${row.flat_net_profit}, avg W/L ${row.average_win}/${row.average_loss}, longest loss run ${row.max_losing_streak} · ${row.assessment}`
+  ).join('  |  ');
+  const shadowStudies = (brain.shadow_stats || []).slice(0, 12).map((row) =>
+    `${row.symbol} ${row.direction} ${row.setup_key}: ${row.selected ? 'traded' : row.approved ? 'approved, skipped' : 'filtered'} ${row.wins}/${row.trades} directional (${row.win_rate}%), ${row.assessment}`
+  ).join('  |  ');
+  const mg = (brain.martingale_comparison || {}).overall || {};
+  const mgByMarket = ((brain.martingale_comparison || {}).by_market || []).slice(0, 8).map((row) =>
+    `${row.symbol} ${row.martingale_net_profit}/${row.martingale_max_drawdown} DD vs flat ${row.flat_net_profit}/${row.flat_max_drawdown} DD (${row.trades}, streak ${row.martingale_max_losing_streak}/${row.flat_max_losing_streak})`
+  ).join(' | ');
+  const martingaleComparison = mg.trades
+    ? `Martingale vs flat stake (${mg.trades} settled): ${mg.martingale_net_profit} / ${mg.martingale_max_drawdown} DD vs ${mg.flat_net_profit} / ${mg.flat_max_drawdown} DD (flat result estimated)${mgByMarket ? ` · by market ${mgByMarket}` : ''}`
+    : '';
   const detailText = [studyText && `Strategy profiles: ${studyText}`,
-    durationStudies && `Duration tests: ${durationStudies}`].filter(Boolean).join('  ·  ');
-  $('brain-ranked').textContent = detailText
-    ? `${rankingText}  ·  ${detailText}`
-    : rankingText;
+    durationStudies && `Duration tests: ${durationStudies}`,
+    priceActionStudies && `Price action by market/setup: ${priceActionStudies}`,
+    shadowStudies && `Shadow setups: ${shadowStudies}`,
+    martingaleComparison].filter(Boolean).join('  ·  ');
+  $('brain-ranked').textContent = [advisorLabel, rankingText, detailText]
+    .filter(Boolean).join('  ·  ');
 }
 
 /* ------------------------------------------------------------ render: risk */
@@ -305,9 +324,12 @@ function renderRisk(snap) {
   const sBar = $('bar-streak');
   sBar.style.width = sPct + '%';
   sBar.className = 'bar-fill ' + (streak >= maxStreak ? 'bad' : streak > 0 ? 'warn' : 'good');
-  $('m-streak-sub').textContent = streak >= maxStreak
+  const martingaleNote = r.martingale_enabled
+    ? ` · recovery step ${r.martingale_step}/${Number(r.martingale_max_steps || 0)}, next stake ${fmtMoney(r.next_stake, cur)}`
+    : ' · martingale off';
+  $('m-streak-sub').textContent = (streak >= maxStreak
     ? 'Paused — reset required'
-    : `${maxStreak - streak} more before pause`;
+    : `${maxStreak - streak} more before pause`) + martingaleNote;
 
   // Trades today
   const used = Number(r.trades_today || 0);

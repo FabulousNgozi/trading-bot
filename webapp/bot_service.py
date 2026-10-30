@@ -220,7 +220,7 @@ class WebBot(TradingBot):
                      self.storage.count_open_trades(), self.cfg.max_open_contracts)
             return
 
-        decision = self.risk.can_trade(stake=self.cfg.stake)
+        decision = self.risk.can_trade(stake=self.risk.next_stake())
         STATE.set_risk(self.risk.status())
         if not decision.allowed:
             log.info("Paused — %s", decision.reason)
@@ -267,6 +267,9 @@ class WebBot(TradingBot):
                     idx, symbol, "warming up — not enough completed candles"))
                 continue
 
+            completed_1m = series["1m"].completed()
+            self.storage.resolve_shadow_signals(symbol, completed_1m)
+
             market_strategy = strategy_for_market(symbol, self.cfg)
             if self.cfg.ai_brain_enabled:
                 policy, scan_strategy, market_study = self.ai_brain.select_strategy(
@@ -294,6 +297,10 @@ class WebBot(TradingBot):
                     "source": "multiplier auto-management",
                     "note": "Close at +/-50% of stake or after 300 seconds.",
                 }
+            if sig.actionable:
+                sig.shadow_id = self.storage.record_shadow_signal(
+                    sig, sig.selected_duration or self.cfg.duration
+                )
             self._log_signal(sig)
 
             repeat = False
@@ -349,6 +356,7 @@ class WebBot(TradingBot):
             for sig in ranked[:3]
         ]
         study["enabled"] = self.cfg.ai_brain_enabled
+        study["model_advisor"] = self.ai_brain.model_advisor.status()
         STATE.set_brain(study)
         if not ranked:
             log.info("No actionable signals this scan")
@@ -388,6 +396,7 @@ class WebBot(TradingBot):
 
             if candidate.candle_epoch is not None:
                 self._last_signal_epoch[candidate.symbol] = candidate.candle_epoch
+            self.storage.mark_shadow_selected(candidate.shadow_id)
             opened += 1
             self._refresh_trades()
             self._publish_open_contracts()
@@ -811,7 +820,8 @@ def run_backtest(symbols: List[str], count: int = 1000,
     No credentials are needed: ``backtest._fetch_public`` uses the public
     WebSocket endpoint, which requires no account.
     """
-    from backtest import Backtester, _fetch_public, aggregate
+    from backtest import Backtester, _fetch_public
+    from storage import payout_estimates_from_db
 
     cfg = load_config(require_credentials=False)
     bt = Backtester(cfg, payout_multiple=payout)
@@ -837,7 +847,16 @@ def run_backtest(symbols: List[str], count: int = 1000,
             })
             continue
 
-        res = bt.run(sym, c1m, c5m, c1h)
+        estimate = payout_estimates_from_db(cfg.db_path, sym).get(1, {})
+        observed = int(estimate.get("samples", 0)) >= 8
+        effective_payout = (float(estimate["payout_multiple"])
+                            if observed else payout)
+        res = bt.run(
+            sym, c1m, c5m, c1h, payout_multiple=effective_payout,
+            payout_source=("recent settled demo wins" if observed
+                           else "configured fallback"),
+            payout_samples=int(estimate.get("samples", 0)),
+        )
         results.append(res)
         s = res.summary()
         # BacktestResult.summary() already reports win_rate_pct in percent.
@@ -853,6 +872,10 @@ def run_backtest(symbols: List[str], count: int = 1000,
             "longest_losing_streak": s["longest_losing_streak"],
             "profit_factor": round(s["profit_factor"], 2)
             if s["trades"] else None,
+            "payout_multiple": effective_payout,
+            "payout_samples": int(estimate.get("samples", 0)),
+            "payout_source": ("recent settled demo wins" if observed
+                              else "configured fallback"),
             "bars_1m": len(c1m),
             "error": None,
         })
@@ -869,7 +892,8 @@ def run_backtest(symbols: List[str], count: int = 1000,
     end = max(r.end_epoch for r in results)
 
     # Breakeven win rate for the assumed payout — the honest yardstick.
-    breakeven = round((1.0 / payout) * 100, 2)
+    breakeven = round(sum((1.0 / r.payout_multiple) * r.n
+                          for r in results) / max(1, total_trades) * 100, 2)
 
     return {
         "markets": market_rows,
@@ -880,6 +904,12 @@ def run_backtest(symbols: List[str], count: int = 1000,
         if total_trades else None,
         "net_profit": total_net,
         "payout_multiple": payout,
+        "payout_multiples_by_market": {
+            r.symbol: {"multiple": r.payout_multiple,
+                       "source": r.payout_source,
+                       "samples": r.payout_samples}
+            for r in results
+        },
         "breakeven_win_rate": breakeven,
         "period_start": datetime.fromtimestamp(start, timezone.utc)
         .strftime("%Y-%m-%d %H:%M"),
@@ -890,7 +920,8 @@ def run_backtest(symbols: List[str], count: int = 1000,
         "assumptions": [
             "Entry at the NEXT bar's open — no look-ahead.",
             "1-minute expiry; a tie counts as a LOSS.",
-            f"Payout modelled as a constant {payout}x multiple of stake.",
+            "Payout per market uses recent settled demo wins when at least 8 "
+            f"observations exist; otherwise uses the {payout}x configured fallback.",
             "Spread and slippage are NOT modelled.",
             "Synthetic indices have no order book, so fills are assumed exact.",
             "Position sizing is a flat stake; compounding is not simulated.",
